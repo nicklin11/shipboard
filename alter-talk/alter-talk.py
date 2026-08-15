@@ -40,7 +40,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 # --------------------------------------------------------------------------
-# Configuration (env-overridable)
+# Configuration: defaults < TOML config file < environment variables
 # --------------------------------------------------------------------------
 KEY_PAUSE = 119       # linux/input-event-codes.h: KEY_PAUSE
 KEY_SCROLLLOCK = 70   # KEY_SCROLLLOCK
@@ -48,33 +48,88 @@ KEY_V = 47            # KEY_V
 KEY_INSERT = 110      # KEY_INSERT
 KEY_ENTER = 28        # KEY_ENTER
 
-WHISPER_URL = os.environ.get(
-    "WHISPER_CPP_URL", "http://127.0.0.1:10300/inference"
-)
-HEALTH_URL = os.environ.get(
-    "WHISPER_CPP_HEALTH_URL", "http://127.0.0.1:10300/health"
-)
-WHISPER_CONTAINER = os.environ.get("WHISPER_CONTAINER", "whisper-local")
-IDLE_MARKER = Path(
-    os.environ.get("WHISPER_IDLE_MARKER", "/tmp/whisper-local-last-use")
-)
-MAX_HOLD = float(os.environ.get("ALTER_TALK_MAX_HOLD", "60"))
-MIN_RECORDING = float(os.environ.get("ALTER_TALK_MIN_RECORDING", "0.5"))
-GRACE = float(os.environ.get("ALTER_TALK_GRACE", "0.15"))  # SL->Pause window
+DEFAULT_CONFIG_PATH = Path(
+    "~/.config/whisper-local/alter-talk.toml"
+).expanduser()
+STATE_PATH = Path(
+    os.environ.get(
+        "ALTER_TALK_STATE", "~/.local/state/alter-talk/state.json"
+    )
+).expanduser()
+
+DEFAULT_CONFIG_TEXT = """\
+# alter-talk configuration
+# Precedence: defaults < this file < environment variables (ALTER_TALK_*).
+
+# Speech-to-text server (local wake proxy or a remote tailnet host)
+whisper_url = "http://127.0.0.1:10300/inference"
+whisper_health_url = "http://127.0.0.1:10300/health"
+whisper_container = "whisper-local"
+
+# Recording
+max_hold = 60          # seconds; force-finish a stuck recording
+min_recording = 0.5    # seconds; shorter recordings are discarded
+
+# Send mode (Scroll Lock / both keys)
+paste_combo = "ctrl+shift+v"   # injected as a modifier combo (layout-proof)
+send_enter = true              # also press Enter after pasting
+
+# Both-keys detection window (seconds): Scroll Lock pressed this long before
+# Pause is still treated as "both held".
+grace = 0.15
+
+# Dictation normalization: "тильда слэш точка конфиг" -> "~/.config"
+normalize = true
+"""
+
+
+def _load_toml_config(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        import tomllib
+        with open(path, "rb") as fh:
+            return tomllib.load(fh)
+    except Exception:
+        return {}
+
+
+_CFG = _load_toml_config(DEFAULT_CONFIG_PATH)
+
+
+def _cfg(name: str, env_name: str, default, conv=str):
+    if env_name in os.environ:
+        return conv(os.environ[env_name])
+    if name in _CFG:
+        return conv(_CFG[name])
+    return default
+
+
+def _as_bool(v) -> bool:
+    return str(v).lower() in ("1", "true", "yes", "on")
+
+
+WHISPER_URL = _cfg("whisper_url", "WHISPER_CPP_URL",
+                   "http://127.0.0.1:10300/inference")
+HEALTH_URL = _cfg("whisper_health_url", "WHISPER_CPP_HEALTH_URL",
+                  "http://127.0.0.1:10300/health")
+WHISPER_CONTAINER = _cfg("whisper_container", "WHISPER_CONTAINER",
+                         "whisper-local")
+IDLE_MARKER = Path(_cfg("idle_marker", "WHISPER_IDLE_MARKER",
+                        "/tmp/whisper-local-last-use"))
+MAX_HOLD = _cfg("max_hold", "ALTER_TALK_MAX_HOLD", 60.0, float)
+MIN_RECORDING = _cfg("min_recording", "ALTER_TALK_MIN_RECORDING", 0.5, float)
+GRACE = _cfg("grace", "ALTER_TALK_GRACE", 0.15, float)  # SL->Pause window
 RATE = 16000
 CHANNELS = 1
-LOCK_PATH = Path(os.environ.get("ALTER_TALK_LOCK", "/tmp/alter-talk.lock"))
-DAEMON_LOCK_PATH = Path(
-    os.environ.get("ALTER_TALK_DAEMON_LOCK", "/tmp/alter-talk.daemon.lock")
-)
-PASTE_COMBO = os.environ.get("ALTER_TALK_PASTE_COMBO", "ctrl+shift+v").lower()
-SEND_ENTER = os.environ.get("ALTER_TALK_SEND_ENTER", "1").lower() in (
-    "1", "true", "yes", "on"
-)
-DRY_RUN = os.environ.get("ALTER_TALK_DRY_RUN", "") != ""
-NORMALIZE = os.environ.get("ALTER_TALK_NORMALIZE", "1").lower() in (
-    "1", "true", "yes", "on"
-)
+LOCK_PATH = Path(_cfg("lock_path", "ALTER_TALK_LOCK", "/tmp/alter-talk.lock"))
+DAEMON_LOCK_PATH = Path(_cfg("daemon_lock_path", "ALTER_TALK_DAEMON_LOCK",
+                             "/tmp/alter-talk.daemon.lock"))
+PASTE_COMBO = _cfg("paste_combo", "ALTER_TALK_PASTE_COMBO",
+                   "ctrl+shift+v", str.lower)
+SEND_ENTER = _cfg("send_enter", "ALTER_TALK_SEND_ENTER", True, _as_bool)
+DRY_RUN = _cfg("dry_run", "ALTER_TALK_DRY_RUN", False, _as_bool)
+NORMALIZE = _cfg("normalize", "ALTER_TALK_NORMALIZE", True, _as_bool)
 
 _COMBO_KEYS = {
     "ctrl": 29,        # KEY_LEFTCTRL
@@ -494,6 +549,7 @@ class _Daemon:
         self.recording = True
         self.rec_t0 = time.monotonic()
         self._tmp_dir = tmp_dir
+        _write_state(state="recording")
         _notify("alter-talk", "Запись... (держите Pause)")
 
     def _finish_record(self) -> None:
@@ -515,6 +571,7 @@ class _Daemon:
                 _notify("alter-talk", "Ошибка: файл записи пуст")
                 return
             _notify("alter-talk", "Обработка голоса...")
+            _write_state(state="processing")
             try:
                 text = transcribe(wav)
             except Exception as exc:
@@ -536,8 +593,10 @@ class _Daemon:
                 except Exception as exc:
                     _notify("alter-talk", f"Скопировано, но не отправлено: {exc}")
                     return
+                _write_state(state="sent", text=preview)
                 _notify("alter-talk", f"Отправлено: {preview}")
             else:
+                _write_state(state="copied", text=preview)
                 _notify("alter-talk", f"Скопировано: {preview}")
         finally:
             try:
@@ -579,6 +638,7 @@ class _Daemon:
     def run(self) -> None:
         import evdev
 
+        _write_state(state="running", pid=os.getpid())
         devices = _watch_devices()
         if not devices:
             _notify("alter-talk", "Демон: клавиши Pause/ScrollLock не найдены на evdev")
@@ -619,6 +679,73 @@ class _Daemon:
                         dev.close()
                     except Exception:
                         pass
+
+
+# --------------------------------------------------------------------------
+# State + status/config helpers
+# --------------------------------------------------------------------------
+def _write_state(**fields: object) -> None:
+    try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        data = {"ts": int(time.time())}
+        data.update(fields)
+        tmp = STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False))
+        tmp.replace(STATE_PATH)
+    except Exception:
+        pass
+
+
+def _daemon_running() -> bool:
+    try:
+        fh = open(DAEMON_LOCK_PATH, "w")
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
+    finally:
+        fh.close()
+
+
+def _status_main() -> int:
+    print(f"daemon:    {'running' if _daemon_running() else 'stopped'}")
+    print(f"config:    {DEFAULT_CONFIG_PATH}")
+    print(f"stt:       {WHISPER_URL}")
+    print("keys:      Pause = record->clipboard | Scroll Lock = paste+Enter |"
+          " both = record->paste+Enter")
+    print(f"paste:     {PASTE_COMBO}{' + Enter' if SEND_ENTER else ''}"
+          f" | grace {GRACE}s | max hold {MAX_HOLD}s"
+          f" | min rec {MIN_RECORDING}s")
+    print(f"normalize: {'on' if NORMALIZE else 'off'}")
+    if STATE_PATH.is_file():
+        try:
+            st = json.loads(STATE_PATH.read_text())
+            when = time.strftime("%H:%M:%S", time.localtime(st.get("ts", 0)))
+            print(f"last:      {st.get('state', '?')} @ {when}")
+            if st.get("text"):
+                print(f"           {st['text']}")
+        except Exception:
+            pass
+    return 0
+
+
+def _config_main() -> int:
+    if not DEFAULT_CONFIG_PATH.is_file():
+        DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DEFAULT_CONFIG_PATH.write_text(DEFAULT_CONFIG_TEXT)
+        print(f"created:   {DEFAULT_CONFIG_PATH}")
+        print("edit it, then restart the daemon")
+    else:
+        print(f"config:    {DEFAULT_CONFIG_PATH}")
+    print(f"stt:       {WHISPER_URL}")
+    print(f"paste:     {PASTE_COMBO}{' + Enter' if SEND_ENTER else ''}")
+    print(f"recording: max_hold {MAX_HOLD}s, min {MIN_RECORDING}s,"
+          f" grace {GRACE}s")
+    print(f"normalize: {'on' if NORMALIZE else 'off'}")
+    return 0
 
 
 # --------------------------------------------------------------------------
@@ -663,6 +790,11 @@ def _send_main() -> int:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["status"]:
+        return _status_main()
+    if sys.argv[1:2] == ["config"]:
+        return _config_main()
+
     parser = argparse.ArgumentParser(
         description="alter-talk: voice daemon (Pause/Scroll Lock) + helpers."
     )

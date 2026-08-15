@@ -1,0 +1,24 @@
+# alter-talk configuration
+# Precedence: defaults < this file < environment variables (ALTER_TALK_*).
+# Generate your own copy with: alter-talk config
+# (default location: ~/.config/whisper-local/alter-talk.toml)
+
+# Speech-to-text server (local wake proxy or a remote tailnet host)
+whisper_url = "http://127.0.0.1:10300/inference"
+whisper_health_url = "http://127.0.0.1:10300/health"
+whisper_container = "whisper-local"
+
+# Recording
+max_hold = 60          # seconds; force-finish a stuck recording
+min_recording = 0.5    # seconds; shorter recordings are discarded
+
+# Send mode (Scroll Lock / both keys)
+paste_combo = "ctrl+shift+v"   # injected as a modifier combo (layout-proof)
+send_enter = true              # also press Enter after pasting
+
+# Both-keys detection window (seconds): Scroll Lock pressed this long before
+# Pause is still treated as "both held".
+grace = 0.15
+
+# Dictation normalization: "тильда слэш точка конфиг" -> "~/.config"
+normalize = true

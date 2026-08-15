@@ -51,6 +51,22 @@ The daemon does **not** need keybinds — but the compositor should swallow the
 keys so they never reach the focused app (kitty encodes unbound keys as
 `CSI …u` sequences). See the parent README's Troubleshooting section.
 
+## Configuration
+
+Settings come from, in order of precedence: built-in defaults < the TOML
+config file (<code>~/.config/whisper-local/alter-talk.toml</code>) <
+environment variables (<code>ALTER_TALK_*</code>).
+
+```bash
+alter-talk config   # generate the config file (if missing) and show the
+                    # effective settings
+alter-talk status   # daemon state, keys, last transcript
+```
+
+See <code>alter-talk.toml.example</code> for the documented template. Point
+<code>whisper_url</code> at a tailnet host to transcribe through a remote
+machine's GPU (see the parent README's Remote use section).
+
 ## Manual / debug
 
 ```bash
