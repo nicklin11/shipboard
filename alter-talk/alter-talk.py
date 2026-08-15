@@ -236,7 +236,7 @@ def _ensure_server(timeout: float = 60.0) -> None:
         if _server_healthy():
             return
         time.sleep(0.5)
-    raise RuntimeError(f"whisper.cpp не поднялся на {HEALTH_URL}")
+    raise RuntimeError(f"whisper.cpp did not come up at {HEALTH_URL}")
 
 
 def transcribe(wav_path: Path) -> str:
@@ -259,16 +259,16 @@ def transcribe(wav_path: Path) -> str:
         detail = exc.read().decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"whisper.cpp HTTP {exc.code}: {detail or exc.reason}") from exc
     except urllib_error.URLError as exc:
-        raise RuntimeError(f"whisper.cpp недоступен: {exc.reason}") from exc
+        raise RuntimeError(f"whisper.cpp unavailable: {exc.reason}") from exc
 
     try:
         result = json.loads(payload)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"whisper.cpp вернул не JSON: {payload[:300]}") from exc
+        raise RuntimeError(f"whisper.cpp returned non-JSON: {payload[:300]}") from exc
 
     text = result.get("text") if isinstance(result, dict) else result
     if not isinstance(text, str):
-        raise RuntimeError(f"whisper.cpp: нет текста в ответе: {payload[:300]}")
+        raise RuntimeError(f"whisper.cpp: no text in response: {payload[:300]}")
     return text.strip()
 
 
@@ -347,7 +347,7 @@ def copy_to_clipboard(text: str) -> None:
         ["wl-copy"], input=text.encode("utf-8"), env=env, timeout=10
     )
     if proc.returncode != 0:
-        raise RuntimeError("wl-copy не сработал (Wayland-сессия есть?)")
+        raise RuntimeError("wl-copy failed (Wayland session up?)")
 
 
 # --------------------------------------------------------------------------
@@ -378,12 +378,12 @@ def _inject_uinput(combo: str, enter: bool) -> None:
 
     parts = combo.split("+")
     if len(parts) < 2 or parts[-1] not in ("v", "insert", "enter"):
-        raise ValueError(f"неподдерживаемая комбинация: {combo!r}")
+        raise ValueError(f"unsupported combo: {combo!r}")
     mods = []
     for part in parts[:-1]:
         code = _COMBO_KEYS.get(part)
         if code is None:
-            raise ValueError(f"неизвестная клавиша в комбинации: {part!r}")
+            raise ValueError(f"unknown key in combo: {part!r}")
         mods.append(code)
     key = _COMBO_KEYS[parts[-1]]
 
@@ -425,7 +425,7 @@ def send_keys(combo: str = PASTE_COMBO, enter: bool = SEND_ENTER) -> None:
         _inject_uinput(combo, enter)
     except Exception:
         if not _inject_via_wtype(combo, enter):
-            raise RuntimeError("не удалось внедрить клавиши (uinput недоступен, wtype нет)")
+            raise RuntimeError("failed to inject keys (uinput unavailable, no wtype)")
 
 
 # --------------------------------------------------------------------------
@@ -457,8 +457,8 @@ def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
         wav_path = tmp_dir / "rec.wav"
         _notify(
             "alter-talk",
-            "Запись... (держите Pause)"
-            + (" — отпустите: вставлю и отправлю" if autosend else ""),
+            "Recording... (hold Pause)"
+            + (" — release: will paste and send" if autosend else ""),
         )
         proc = start_recording(wav_path)
         t0 = time.monotonic()
@@ -491,29 +491,29 @@ def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
         stop_recording(proc)
         duration = time.monotonic() - t0
         if duration < MIN_RECORDING:
-            _notify("alter-talk", "Слишком короткая запись")
+            _notify("alter-talk", "Recording too short")
             return 0
         if not wav_path.is_file() or wav_path.stat().st_size == 0:
-            _notify("alter-talk", "Ошибка: файл записи пуст")
+            _notify("alter-talk", "Error: empty recording file")
             return 1
 
-        _notify("alter-talk", "Обработка голоса...")
+        _notify("alter-talk", "Processing speech...")
         try:
             text = transcribe(wav_path)
         except Exception as exc:
-            _notify("alter-talk", f"Ошибка распознавания: {exc}")
+            _notify("alter-talk", f"Recognition error: {exc}")
             print(f"alter-talk: {exc}", file=sys.stderr)
             return 1
         text = normalize_text(text)
 
         if not text:
-            _notify("alter-talk", "Ничего не распознано")
+            _notify("alter-talk", "Nothing recognized")
             return 0
 
         try:
             copy_to_clipboard(text)
         except Exception as exc:
-            _notify("alter-talk", f"Не удалось скопировать: {exc}")
+            _notify("alter-talk", f"Failed to copy: {exc}")
             print(f"alter-talk: {exc}", file=sys.stderr)
             return 1
         preview = text if len(text) <= 100 else text[:100] + "…"
@@ -522,11 +522,11 @@ def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
             try:
                 send_keys()
             except Exception as exc:
-                _notify("alter-talk", f"Скопировано, но не отправлено: {exc}")
+                _notify("alter-talk", f"Copied, but not sent: {exc}")
                 return 1
-            _notify("alter-talk", f"Отправлено: {preview}")
+            _notify("alter-talk", f"Sent: {preview}")
         else:
-            _notify("alter-talk", f"Скопировано: {preview}")
+            _notify("alter-talk", f"Copied: {preview}")
         return 0
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -565,7 +565,7 @@ class _Daemon:
         self.rec_t0 = time.monotonic()
         self._tmp_dir = tmp_dir
         _write_state(state="recording")
-        _notify("alter-talk", "Запись... (держите Pause)")
+        _notify("alter-talk", "Recording... (hold Pause)")
 
     def _finish_record(self) -> None:
         if not self.recording or self.rec_proc is None:
@@ -580,39 +580,39 @@ class _Daemon:
         wav = Path(self._tmp_dir) / "rec.wav"
         try:
             if duration < MIN_RECORDING:
-                _notify("alter-talk", "Слишком короткая запись")
+                _notify("alter-talk", "Recording too short")
                 return
             if not wav.is_file() or wav.stat().st_size == 0:
-                _notify("alter-talk", "Ошибка: файл записи пуст")
+                _notify("alter-talk", "Error: empty recording file")
                 return
-            _notify("alter-talk", "Обработка голоса...")
+            _notify("alter-talk", "Processing speech...")
             _write_state(state="processing")
             try:
                 text = transcribe(wav)
             except Exception as exc:
-                _notify("alter-talk", f"Ошибка распознавания: {exc}")
+                _notify("alter-talk", f"Recognition error: {exc}")
                 return
             text = normalize_text(text)
             if not text:
-                _notify("alter-talk", "Ничего не распознано")
+                _notify("alter-talk", "Nothing recognized")
                 return
             try:
                 copy_to_clipboard(text)
             except Exception as exc:
-                _notify("alter-talk", f"Не удалось скопировать: {exc}")
+                _notify("alter-talk", f"Failed to copy: {exc}")
                 return
             preview = text if len(text) <= 100 else text[:100] + "…"
             if autosend:
                 try:
                     send_keys()
                 except Exception as exc:
-                    _notify("alter-talk", f"Скопировано, но не отправлено: {exc}")
+                    _notify("alter-talk", f"Copied, but not sent: {exc}")
                     return
                 _write_state(state="sent", text=preview)
-                _notify("alter-talk", f"Отправлено: {preview}")
+                _notify("alter-talk", f"Sent: {preview}")
             else:
                 _write_state(state="copied", text=preview)
-                _notify("alter-talk", f"Скопировано: {preview}")
+                _notify("alter-talk", f"Copied: {preview}")
         finally:
             try:
                 shutil.rmtree(self._tmp_dir, ignore_errors=True)
@@ -656,7 +656,7 @@ class _Daemon:
         _write_state(state="running", pid=os.getpid())
         devices = _watch_devices()
         if not devices:
-            _notify("alter-talk", "Демон: клавиши Pause/ScrollLock не найдены на evdev")
+            _notify("alter-talk", "Daemon: Pause/ScrollLock keys not found on evdev")
         while True:
             now = time.monotonic()
             # Grace expiry: no Pause followed the Scroll Lock tap -> send.
@@ -665,7 +665,7 @@ class _Daemon:
                 try:
                     send_keys()
                 except Exception as exc:
-                    _notify("alter-talk", f"Не удалось отправить: {exc}")
+                    _notify("alter-talk", f"Failed to send: {exc}")
             # MAX_HOLD safety: force-finish a stuck recording.
             if self.recording and now - self.rec_t0 > MAX_HOLD:
                 self._finish_record()
@@ -987,7 +987,7 @@ def _daemon_main() -> int:
     try:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        print("alter-talk: демон уже запущен", file=sys.stderr)
+        print("alter-talk: daemon already running", file=sys.stderr)
         return 0
     try:
         _Daemon().run()
@@ -1010,12 +1010,12 @@ def _send_main() -> int:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         lock_fh.close()
     except OSError:
-        _notify("alter-talk", "Идёт запись — пропускаю вставку")
+        _notify("alter-talk", "Recording in progress — skipping paste")
         return 0
     try:
         send_keys()
     except Exception as exc:
-        _notify("alter-talk", f"Не удалось отправить: {exc}")
+        _notify("alter-talk", f"Failed to send: {exc}")
         return 1
     return 0
 
@@ -1063,20 +1063,20 @@ def main() -> int:
             if args.file is not None:
                 wav = args.file.expanduser().resolve()
                 if not wav.is_file():
-                    print(f"Файл не найден: {wav}", file=sys.stderr)
+                    print(f"File not found: {wav}", file=sys.stderr)
                     return 1
-                _notify("alter-talk", "Обработка голоса...")
+                _notify("alter-talk", "Processing speech...")
                 try:
                     text = transcribe(wav)
                 except Exception as exc:
-                    _notify("alter-talk", f"Ошибка распознавания: {exc}")
+                    _notify("alter-talk", f"Recognition error: {exc}")
                     return 1
                 text = normalize_text(text)
                 if args.no_copy:
                     print(text)
                 else:
                     copy_to_clipboard(text)
-                    _notify("alter-talk", f"Скопировано: {text[:100]}")
+                    _notify("alter-talk", f"Copied: {text[:100]}")
                 return 0
             return run_record_cycle(autosend=False, seconds=args.seconds)
         finally:

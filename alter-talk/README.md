@@ -22,7 +22,7 @@ pastes correctly regardless of the active layout.
   (auto-send after recognition). The keys can be pressed in either order; a
   150 ms grace window catches near-simultaneous presses.
 
-Notifications: Запись… / Обработка голоса… / Скопировано… / Отправлено…
+Notifications: Recording… / Processing speech… / Copied… / Sent…
 
 ## Dictation symbols
 
