@@ -320,6 +320,9 @@ def normalize_text(text: str) -> str:
     """Replace spoken punctuation names with symbols and glue them."""
     if not NORMALIZE or not text:
         return text
+    # whisper returns segments joined with newlines (VAD cuts the speech);
+    # the result must be a single line
+    text = re.sub(r"\s+", " ", text)
     text = _TOKEN_RE.sub(lambda m: _SYMBOL_MAP[m.group(1).lower()], text)
     text = _GLUE_DASH_RE.sub("-", text)
     # the model often writes hyphens around the spoken word; collapse the
@@ -761,6 +764,222 @@ def _config_main() -> int:
 
 
 # --------------------------------------------------------------------------
+# TUI setup (stdlib curses, no dependencies)
+# --------------------------------------------------------------------------
+_SETUP_FIELDS = [
+    ("whisper_url",        "STT server URL (wake/tailnet proxy)", str),
+    ("whisper_health_url", "Health URL",                          str),
+    ("whisper_container",  "Docker container to wake",           str),
+    ("paste_combo",        "Paste shortcut (uinput combo)",      str),
+    ("send_enter",         "Press Enter after paste",            bool),
+    ("max_hold",           "Max hold, seconds (stuck guard)",    float),
+    ("min_recording",      "Min recording, seconds",             float),
+    ("grace",              "Both-keys window, seconds",          float),
+    ("normalize",          "Dictation symbols (слэш/дэш/...) ",  bool),
+]
+
+
+def _field_defaults() -> dict:
+    return {
+        "whisper_url": "http://127.0.0.1:10300/inference",
+        "whisper_health_url": "http://127.0.0.1:10300/health",
+        "whisper_container": "whisper-local",
+        "paste_combo": "ctrl+shift+v",
+        "send_enter": True,
+        "max_hold": 60.0,
+        "min_recording": 0.5,
+        "grace": 0.15,
+        "normalize": True,
+    }
+
+
+def _fmt_value(v) -> str:
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, float):
+        return f"{v:g}"
+    return str(v)
+
+
+def _parse_value(raw: str, conv) -> object:
+    if conv is bool:
+        return raw.strip().lower() in ("1", "true", "yes", "on", "y")
+    return conv(raw.strip())
+
+
+def _save_config_file(values: dict) -> None:
+    lines = [
+        "# alter-talk configuration (edited with 'alter-talk setup')",
+        "# Precedence: defaults < this file < environment variables.",
+        "",
+    ]
+    for key, _label, conv in _SETUP_FIELDS:
+        v = values[key]
+        if conv is str:
+            lines.append(f'{key} = "{v}"')
+        elif conv is bool:
+            lines.append(f"{key} = {'true' if v else 'false'}")
+        else:
+            lines.append(f"{key} = {v}")
+    lines.append("")
+    DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DEFAULT_CONFIG_PATH.write_text("\n".join(lines))
+
+
+def _health_check(url: str) -> str:
+    try:
+        with urllib_request.urlopen(url, timeout=3) as resp:
+            return "OK" if 200 <= resp.status < 300 else f"HTTP {resp.status}"
+    except Exception as exc:
+        return f"FAIL: {exc}"
+
+
+def _daemon_pids() -> list[int]:
+    import subprocess as sp
+
+    out = sp.run(["pgrep", "-f", "alter-talk"], capture_output=True, text=True)
+    pids = []
+    for pid in out.stdout.split():
+        try:
+            pid = int(pid)
+        except ValueError:
+            continue
+        if pid == os.getpid():
+            continue  # never kill our own TUI process
+        pids.append(pid)
+    return pids
+
+
+def _restart_daemon() -> str:
+    try:
+        subprocess.run(
+            ["systemctl", "--user", "restart", "alter-talk"],
+            capture_output=True, timeout=15,
+        )
+        return "restarted via systemd"
+    except Exception:
+        pass
+    for pid in _daemon_pids():
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    subprocess.Popen(
+        [sys.executable, str(Path(sys.argv[0]).resolve())],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return "restarted (detached)"
+
+
+_COMPOSITOR_SNIPPETS = """\
+Bind the keys to a no-op in your compositor so they don't leak into apps
+(kitty encodes unbound keys as CSI-u text). The daemon reads them via evdev.
+
+niri (~/.config/niri/conf/binds.kdl):
+    Pause repeat=false { spawn "true"; }
+    Scroll_Lock repeat=false { spawn "true"; }
+  autostart:  spawn-at-startup "alter-talk"
+
+Hyprland:
+    bind = , Pause, exec, true
+    bind = , Scroll_Lock, exec, true
+  autostart:  exec-once = alter-talk
+"""
+
+
+def _tui_loop(stdscr) -> int:
+    import curses
+
+    curses.curs_set(0)
+    values = _field_defaults()
+    values.update(_CFG)
+    selected = 0
+    editing = False
+    edit_buf = ""
+    message = "j/k or arrows: move · Enter: edit · Space: toggle · s: save · t: test STT · p: snippets · r: restart · q: quit"
+
+    def draw() -> None:
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        title = f" alter-talk setup — {DEFAULT_CONFIG_PATH} "
+        stdscr.addstr(0, 0, title[:w - 1], curses.A_REVERSE)
+        for i, (key, label, conv) in enumerate(_SETUP_FIELDS):
+            if i + 1 >= h - 4:
+                break
+            line = f" {i + 1:2}) {label:<40} {_fmt_value(values[key])}"
+            attr = curses.A_REVERSE if i == selected else 0
+            stdscr.addstr(i + 1, 0, line[:w - 1], attr)
+        stdscr.addstr(h - 3, 0, message[:w - 1])
+        if editing:
+            stdscr.addstr(h - 2, 0, "> " + edit_buf[:w - 3])
+        stdscr.refresh()
+
+    draw()
+    while True:
+        ch = stdscr.getch()
+        if editing:
+            if ch in (10, 13, curses.KEY_ENTER):  # commit
+                key, _label, conv = _SETUP_FIELDS[selected]
+                try:
+                    values[key] = _parse_value(edit_buf, conv)
+                    message = f"{key} = {_fmt_value(values[key])}"
+                except ValueError:
+                    message = "invalid value, not saved"
+                editing = False
+            elif ch in (27,):  # escape
+                editing = False
+                message = "edit cancelled"
+            elif ch in (8, 127, curses.KEY_BACKSPACE):
+                edit_buf = edit_buf[:-1]
+            elif 32 <= ch < 127:
+                edit_buf += chr(ch)
+            draw()
+            continue
+        if ch in (ord("q"), 27):
+            return 0
+        if ch in (ord("j"), curses.KEY_DOWN):
+            selected = min(selected + 1, len(_SETUP_FIELDS) - 1)
+        elif ch in (ord("k"), curses.KEY_UP):
+            selected = max(selected - 1, 0)
+        elif ch in (10, 13, curses.KEY_ENTER):
+            key, _label, conv = _SETUP_FIELDS[selected]
+            if conv is bool:
+                values[key] = not values[key]
+                message = f"{key} = {_fmt_value(values[key])}"
+            else:
+                editing = True
+                edit_buf = _fmt_value(values[key])
+        elif ch == ord(" "):
+            key, _label, conv = _SETUP_FIELDS[selected]
+            if conv is bool:
+                values[key] = not values[key]
+        elif ch == ord("s"):
+            _save_config_file(values)
+            message = "saved. Restart the daemon to apply (r)."
+        elif ch == ord("t"):
+            message = "testing STT: " + _health_check(values["whisper_health_url"])
+        elif ch == ord("p"):
+            sh, sw = stdscr.getmaxyx()
+            stdscr.erase()
+            stdscr.addstr(0, 0, "Compositor keybind snippets (press any key)", curses.A_REVERSE)
+            for i, line in enumerate(_COMPOSITOR_SNIPPETS.splitlines(), start=1):
+                stdscr.addstr(i, 0, line[: sw - 1])
+            stdscr.getch()
+            draw()
+            continue
+        elif ch == ord("r"):
+            message = _restart_daemon()
+        draw()
+
+
+def _setup_main() -> int:
+    import curses
+
+    return curses.wrapper(_tui_loop)
+
+
+# --------------------------------------------------------------------------
 # Entry points
 # --------------------------------------------------------------------------
 def _daemon_main() -> int:
@@ -806,6 +1025,8 @@ def main() -> int:
         return _status_main()
     if sys.argv[1:2] == ["config"]:
         return _config_main()
+    if sys.argv[1:2] == ["setup"]:
+        return _setup_main()
 
     parser = argparse.ArgumentParser(
         description="alter-talk: voice daemon (Pause/Scroll Lock) + helpers."

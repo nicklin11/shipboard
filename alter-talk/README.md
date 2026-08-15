@@ -58,6 +58,8 @@ config file (<code>~/.config/whisper-local/alter-talk.toml</code>) <
 environment variables (<code>ALTER_TALK_*</code>).
 
 ```bash
+alter-talk setup   # TUI: edit settings, test STT, compositor snippets,
+                    # restart the daemon (stdlib curses, no dependencies)
 alter-talk config   # generate the config file (if missing) and show the
                     # effective settings
 alter-talk status   # daemon state, keys, last transcript
