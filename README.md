@@ -91,6 +91,7 @@ Config (env vars):
 | `ALTER_TALK_MAX_HOLD` | `60` | max recording seconds |
 | `ALTER_TALK_MIN_RECORDING` | `0.5` | minimum recording seconds |
 | `ALTER_TALK_GRACE` | `0.15` | both-keys detection window (s) |
+| `ALTER_TALK_NORMALIZE` | `1` | dictation normalization: spoken punctuation names become glued symbols (`тильда слэш точка конфиг` → `~/.config`) |
 
 ## Hermes integration
 

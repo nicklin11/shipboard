@@ -26,6 +26,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import select
 import shutil
 import signal
@@ -71,6 +72,9 @@ SEND_ENTER = os.environ.get("ALTER_TALK_SEND_ENTER", "1").lower() in (
     "1", "true", "yes", "on"
 )
 DRY_RUN = os.environ.get("ALTER_TALK_DRY_RUN", "") != ""
+NORMALIZE = os.environ.get("ALTER_TALK_NORMALIZE", "1").lower() in (
+    "1", "true", "yes", "on"
+)
 
 _COMBO_KEYS = {
     "ctrl": 29,        # KEY_LEFTCTRL
@@ -210,6 +214,51 @@ def transcribe(wav_path: Path) -> str:
     text = result.get("text") if isinstance(result, dict) else result
     if not isinstance(text, str):
         raise RuntimeError(f"whisper.cpp: нет текста в ответе: {payload[:300]}")
+    return text.strip()
+
+
+# --------------------------------------------------------------------------
+# Dictation normalization: spoken punctuation names -> symbols, glued.
+# "тильда слэш точка конфиг" -> "~/.config", "alt dash talk" -> "alt-talk".
+# --------------------------------------------------------------------------
+_SYMBOL_MAP = {
+    # Russian
+    "слэш": "/", "слеш": "/", "точка": ".", "тильда": "~",
+    "дефис": "-", "минус": "-", "запятая": ",", "точка с запятой": ";",
+    "двоеточие": ":", "равно": "=", "амперсанд": "&", "процент": "%",
+    "собака": "@", "нижнее подчёркивание": "_", "подчёркивание": "_",
+    "звёздочка": "*", "решётка": "#", "решетка": "#", "плюс": "+",
+    "вопрос": "?", "восклицание": "!", "кавычка": '"',
+    "открывающая скобка": "(", "закрывающая скобка": ")",
+    "апостроф": "'", "пробел": " ",
+    # English
+    "slash": "/", "dot": ".", "tilde": "~", "dash": "-", "hyphen": "-",
+    "comma": ",", "colon": ":", "semicolon": ";", "equals": "=",
+    "equal": "=", "ampersand": "&", "percent": "%", "at": "@",
+    "underscore": "_", "asterisk": "*", "star": "*", "hash": "#",
+    "question mark": "?", "exclamation mark": "!", "exclamation": "!",
+    "plus": "+", "minus": "-", "quote": '"', "apostrophe": "'",
+    "open paren": "(", "close paren": ")", "space": " ",
+}
+_TOKEN_RE = re.compile(
+    r"\b(" + "|".join(
+        re.escape(tok) for tok in sorted(_SYMBOL_MAP, key=len, reverse=True)
+    ) + r")\b",
+    re.IGNORECASE,
+)
+_COLLAPSE_RE = re.compile(
+    r"\s*([" + re.escape(
+        "".join(sorted(set(_SYMBOL_MAP.values()) - {" ", "\t"}))
+    ) + r"])\s*"
+)
+
+
+def normalize_text(text: str) -> str:
+    """Replace spoken punctuation names with symbols and glue them."""
+    if not NORMALIZE or not text:
+        return text
+    text = _TOKEN_RE.sub(lambda m: _SYMBOL_MAP[m.group(1).lower()], text)
+    text = _COLLAPSE_RE.sub(r"\1", text)
     return text.strip()
 
 
@@ -385,6 +434,7 @@ def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
             _notify("alter-talk", f"Ошибка распознавания: {exc}")
             print(f"alter-talk: {exc}", file=sys.stderr)
             return 1
+        text = normalize_text(text)
 
         if not text:
             _notify("alter-talk", "Ничего не распознано")
@@ -470,6 +520,7 @@ class _Daemon:
             except Exception as exc:
                 _notify("alter-talk", f"Ошибка распознавания: {exc}")
                 return
+            text = normalize_text(text)
             if not text:
                 _notify("alter-talk", "Ничего не распознано")
                 return
@@ -655,6 +706,7 @@ def main() -> int:
                 except Exception as exc:
                     _notify("alter-talk", f"Ошибка распознавания: {exc}")
                     return 1
+                text = normalize_text(text)
                 if args.no_copy:
                     print(text)
                 else:

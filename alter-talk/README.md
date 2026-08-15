@@ -24,6 +24,13 @@ pastes correctly regardless of the active layout.
 
 Notifications: Запись… / Обработка голоса… / Скопировано… / Отправлено…
 
+## Dictation symbols
+
+After transcription the text is normalized: spoken punctuation names become
+symbols and get glued to neighbors (`тильда слэш точка конфиг` →
+`~/.config`, `alt dash talk` → `alt-talk`). Russian and English names are
+supported. Disable with `ALTER_TALK_NORMALIZE=0`.
+
 ## Run
 
 ```bash
