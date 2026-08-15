@@ -45,26 +45,6 @@ services:
       start_period: 5m
     logging: *log-options
 
-  # Optional: tail live log files of a host app via
-  # `docker compose --profile hermes-logs up -d`. Set HERMES_LOG_DIR to the
-  # directory holding the app's log files.
-  hermes-logs:
-    profiles: ["hermes-logs"]
-    image: alpine:3.22
-    container_name: hermes-log-bridge
-    command:
-      - tail
-      - -n
-      - "0"
-      - -F
-      - /logs/agent.log
-      - /logs/errors.log
-    volumes:
-      - ${HERMES_LOG_DIR:-${HOME}/.hermes/logs}:/logs:ro
-    read_only: true
-    restart: unless-stopped
-    logging: *log-options
-
 volumes:
   whisper-data:
     external: true

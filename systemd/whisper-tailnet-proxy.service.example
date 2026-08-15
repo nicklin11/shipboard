@@ -4,9 +4,9 @@ After=docker.service tailscaled.service whisper-wake-proxy.service
 Wants=whisper-wake-proxy.service
 
 # Example: expose the local Whisper API to your Tailscale tailnet so other
-# devices can transcribe through your GPU. Adjust WHISPER_PROXY_HOST to this
-# machine's tailnet IP, pick a free port, and rename this file to
-# whisper-tailnet-proxy.service before enabling.
+# devices can transcribe through your GPU. Set WHISPER_PROXY_HOST to THIS
+# machine's tailnet IP (`tailscale ip -4`), pick a free port, and rename this
+# file to whisper-tailnet-proxy.service before enabling.
 
 [Service]
 Environment=WHISPER_PROXY_HOST=100.64.0.1

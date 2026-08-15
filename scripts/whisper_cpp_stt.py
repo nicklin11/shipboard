@@ -62,16 +62,11 @@ DEFAULT_PROMPT = (
     "Русская и English речь с переключением языка. "
     "Technical terms and names: Docker, Docker Compose, GitHub, Linux, "
     "Python, JavaScript, TypeScript, API, UI, STT, config, .config, "
-    "Hermes, QuickShell, ExistingLoner, Noctalia Shell, Wayland, Niri, "
+    "Hermes, QuickShell, Noctalia Shell, Wayland, Niri, "
     "Waybar, Fuzzel, Firefox, FunPay, Reanimal."
 )
 PROMPT = os.environ.get("WHISPER_CPP_PROMPT", DEFAULT_PROMPT)
 KNOWN_TERM_REPLACEMENTS = (
-    (
-        re.compile(r"\bExisting\s+(?:Loner|Loaner|Lanner)(?:\.de)?\b", re.I),
-        "ExistingLoner",
-    ),
-    (re.compile(r"\bExistingLoner\.de\b", re.I), "ExistingLoner"),
     (re.compile(r"\bQuick\s+Shell\b", re.I), "QuickShell"),
     (re.compile(r"\bFun\s+Pay\b", re.I), "FunPay"),
     (re.compile(r"\bFire\s+Fox\b", re.I), "Firefox"),
