@@ -286,6 +286,9 @@ _SYMBOL_MAP = {
     "вопрос": "?", "восклицание": "!", "кавычка": '"',
     "открывающая скобка": "(", "закрывающая скобка": ")",
     "апостроф": "'", "пробел": " ",
+    # dash variants: whisper often transliterates these ("desh"/"defiz"/"tire")
+    "дэш": "-", "деш": "-", "desh": "-", "defiz": "-",
+    "тире": "-", "tire": "-", "tireh": "-",
     # English
     "slash": "/", "dot": ".", "tilde": "~", "dash": "-", "hyphen": "-",
     "comma": ",", "colon": ":", "semicolon": ";", "equals": "=",
@@ -306,6 +309,11 @@ _COLLAPSE_RE = re.compile(
         "".join(sorted(set(_SYMBOL_MAP.values()) - {" ", "\t"}))
     ) + r"])\s*"
 )
+# whisper sometimes glues the spoken word to its neighbor ("deshtag",
+# "configdefizfile") — replace the token even as a word prefix then.
+_GLUE_DASH_RE = re.compile(
+    r"(?i)(?:дэш|деш|desh|defiz|тире|tire|tireh)(?=[a-zа-яё0-9])"
+)
 
 
 def normalize_text(text: str) -> str:
@@ -313,6 +321,10 @@ def normalize_text(text: str) -> str:
     if not NORMALIZE or not text:
         return text
     text = _TOKEN_RE.sub(lambda m: _SYMBOL_MAP[m.group(1).lower()], text)
+    text = _GLUE_DASH_RE.sub("-", text)
+    # the model often writes hyphens around the spoken word; collapse the
+    # resulting runs of 3+ (keep "--" — legitimate flag prefix)
+    text = re.sub(r"-{3,}", "--", text)
     text = _COLLAPSE_RE.sub(r"\1", text)
     return text.strip()
 
