@@ -1,0 +1,147 @@
+# whisper-local
+
+On-demand local speech-to-text for Linux desktops, plus a hold-to-talk voice
+input daemon for agent TUIs.
+
+A whisper.cpp server that **sleeps when idle** (frees ~1.5 GiB of VRAM) and
+**wakes on the first request**, paired with `alter-talk` — a compositor-agnostic
+daemon that turns Pause / Scroll Lock into:
+
+| Keys | What happens |
+|---|---|
+| **Pause** (hold) | record → whisper → clipboard |
+| **Scroll Lock** (tap) | paste clipboard → Enter (send) |
+| **Pause + Scroll Lock** | record → whisper → clipboard → paste → Enter (auto-send) |
+
+Everything runs locally — no cloud, no audio leaves your machine.
+
+```
+┌────────────┐  evdev   ┌──────────────┐  pw-record  ┌──────────────┐
+│ Pause/ScrLk│ ───────► │ alter-talk   │ ──────────► │  audio.wav   │
+│  keyboard  │          │ (daemon, WM- │             └──────┬───────┘
+└────────────┘          │  agnostic)   │                    │
+                        └──────┬───────┘                    ▼
+                               │ wl-copy           ┌─────────────────┐
+                               │                   │ whisper.cpp     │
+                               ▼                   │ container (GPU) │
+                        ┌──────────────┐  HTTP     └────────┬────────┘
+                        │  clipboard   │ ◄───────────────────┘
+                        └──────┬───────┘   wakes on demand,
+                               │           sleeps when idle
+                               ▼
+                        paste + Enter (send modes)
+```
+
+## Why this exists
+
+- **VRAM is precious.** The container is stopped by a systemd timer after
+  idle time and started on demand by a wake proxy — zero GPU footprint until
+  you actually speak.
+- **Agent workflows.** Dictate a prompt, hit one key, and it lands in your
+  TUI chat box (kitty, opencode, Hermes, whatever) and gets submitted.
+- **Layout-proof input.** The paste is injected as a modifier combo via
+  uinput, so Cyrillic and any other layout paste correctly.
+
+## Requirements
+
+- Linux with Docker and a GPU supported by whisper.cpp's Vulkan build
+  (AMD/Intel/NVIDIA; the compose file exposes `/dev/dri/renderD128`)
+- PipeWire (`pw-record`), `wl-clipboard`, `python-evdev` (for alter-talk)
+- systemd user session (for the units)
+
+## Quick start
+
+```bash
+# 1. Start the whisper server (downloads the model on first run)
+docker compose up -d
+
+# 2. Install the wake-proxy + idle-stop units
+./scripts/install.sh
+#    proxy listens on 127.0.0.1:10300, wakes the container on demand,
+#    stops it after 5 minutes of silence
+
+# 3. Install the alter-talk daemon
+install -m 0755 alter-talk/alter-talk.py ~/.local/bin/alter-talk
+install -m 0644 alter-talk/alter-talk.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now alter-talk
+```
+
+No compositor keybinds are needed for the keys themselves: the daemon reads
+Pause / Scroll Lock straight from evdev. You only need one compositor tweak —
+**swallow the keys** so they don't leak into apps (see Troubleshooting).
+
+## alter-talk usage
+
+- Hold **Pause**, speak, release → transcript lands in the clipboard
+  (notifications: Запись → Обработка голоса → Скопировано).
+- Tap **Scroll Lock** → the current clipboard is pasted and Enter is pressed.
+- Hold **Pause** and press **Scroll Lock** (any order, ~150 ms window) →
+  the transcript is pasted and sent automatically after recognition.
+
+Config (env vars):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `WHISPER_CPP_URL` | `http://127.0.0.1:10300/inference` | STT endpoint (wake proxy) |
+| `WHISPER_CPP_HEALTH_URL` | `http://127.0.0.1:10300/health` | health endpoint |
+| `WHISPER_CONTAINER` | `whisper-local` | container to wake |
+| `ALTER_TALK_PASTE_COMBO` | `ctrl+shift+v` | paste shortcut to inject |
+| `ALTER_TALK_SEND_ENTER` | `1` | also press Enter after paste |
+| `ALTER_TALK_MAX_HOLD` | `60` | max recording seconds |
+| `ALTER_TALK_MIN_RECORDING` | `0.5` | minimum recording seconds |
+| `ALTER_TALK_GRACE` | `0.15` | both-keys detection window (s) |
+
+## Hermes integration
+
+`scripts/whisper_cpp_stt.py` is a ready STT provider client for
+[Hermes Agent](https://hermes-agent.nousresearch.com). Wire it with:
+
+```bash
+./scripts/install_hermes_stt.sh
+```
+
+## Remote use (Tailscale, optional)
+
+`systemd/whisper-tailnet-proxy.service.example` exposes the wake proxy to
+your tailnet — other devices can transcribe through your GPU. Clients then
+point `WHISPER_CPP_URL` at `http://<this-machine>.headscale.local:8080/inference`.
+
+## Troubleshooting
+
+**Pressing Pause/Scroll Lock types garbage like `[57362u` into TUIs.**
+If the key is not bound in the compositor, it reaches the focused app, and
+kitty's keyboard protocol encodes it as `CSI <code>u` (57362 = Pause) which
+some TUIs render as literal text. Bind the keys to a no-op so the compositor
+swallows them — the daemon still sees them via evdev:
+
+```kdl
+// niri (~/.config/niri/conf/binds.kdl) — note KDL comments use //
+Pause repeat=false { spawn "true"; }
+Scroll_Lock repeat=false { spawn "true"; }
+```
+
+```ini
+# Hyprland
+bind = , Pause, exec, true
+bind = , Scroll_Lock, exec, true
+```
+
+**The container doesn't wake.** Check the proxy is listening
+(`curl 127.0.0.1:10300/health`) and that `whisper-wake-proxy.service` is
+running (`systemctl --user status whisper-wake-proxy`).
+
+**VRAM is still used after idle.** The idle-stop timer checks every minute;
+the container stops after `WHISPER_IDLE_SECONDS` (default 300) of no requests.
+
+## Credits
+
+- [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and its
+  `ghcr.io/ggml-org/whisper.cpp:main-vulkan` image
+- [Silero VAD](https://github.com/snakers4/silero-vad) for voice activity
+  detection
+- python-evdev for key handling and injection
+
+## License
+
+MIT

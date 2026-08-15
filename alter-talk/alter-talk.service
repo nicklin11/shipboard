@@ -1,0 +1,12 @@
+[Unit]
+Description=alter-talk voice input daemon (Pause / Scroll Lock)
+After=pipewire.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/alter-talk
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

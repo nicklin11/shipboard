@@ -1,0 +1,8 @@
+[Unit]
+Description=Stop the local Whisper container after idle timeout
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=WHISPER_IDLE_SECONDS=300
+ExecStart=%h/.config/whisper-local/scripts/whisper_idle_stop.sh

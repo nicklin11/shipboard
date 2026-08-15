@@ -1,0 +1,71 @@
+name: whisper-local
+
+x-log-options: &log-options
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  whisper:
+    image: ghcr.io/ggml-org/whisper.cpp:main-vulkan@sha256:451663721ddad71de3182ced0c9272c13b107b305bffcb81a27d97a62c69d799
+    container_name: whisper-local
+    user: "${USER_UID:-1000}:${USER_GID:-1000}"
+    command: /scripts/start_whisper_server.sh
+    environment:
+      TZ: ${TZ:-UTC}
+      XDG_CACHE_HOME: /tmp/cache
+      WHISPER_MODEL: ${WHISPER_MODEL:-large-v3-turbo}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-auto}
+      WHISPER_BEAM: "${WHISPER_BEAM:-5}"
+      WHISPER_BEST_OF: "${WHISPER_BEST_OF:-5}"
+      WHISPER_THREADS: "${WHISPER_THREADS:-6}"
+      WHISPER_VAD: "${WHISPER_VAD:-true}"
+      WHISPER_VAD_MODEL: ${WHISPER_VAD_MODEL:-silero-v6.2.0}
+      WHISPER_VAD_MIN_SPEECH_MS: "${WHISPER_VAD_MIN_SPEECH_MS:-150}"
+      WHISPER_VAD_MIN_SILENCE_MS: "${WHISPER_VAD_MIN_SILENCE_MS:-500}"
+      WHISPER_VAD_MAX_SPEECH_S: "${WHISPER_VAD_MAX_SPEECH_S:-28}"
+      WHISPER_VAD_PAD_MS: "${WHISPER_VAD_PAD_MS:-200}"
+    volumes:
+      - whisper-data:/models
+      - ./scripts/start_whisper_server.sh:/scripts/start_whisper_server.sh:ro
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    ports:
+      - "127.0.0.1:${WHISPER_PORT:-10302}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 5m
+    logging: *log-options
+
+  # Optional: tail live log files of a host app via
+  # `docker compose --profile hermes-logs up -d`. Set HERMES_LOG_DIR to the
+  # directory holding the app's log files.
+  hermes-logs:
+    profiles: ["hermes-logs"]
+    image: alpine:3.22
+    container_name: hermes-log-bridge
+    command:
+      - tail
+      - -n
+      - "0"
+      - -F
+      - /logs/agent.log
+      - /logs/errors.log
+    volumes:
+      - ${HERMES_LOG_DIR:-${HOME}/.hermes/logs}:/logs:ro
+    read_only: true
+    restart: unless-stopped
+    logging: *log-options
+
+volumes:
+  whisper-data:
+    external: true
+    name: whisper-local-data

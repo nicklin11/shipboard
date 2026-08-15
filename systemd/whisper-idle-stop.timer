@@ -1,0 +1,12 @@
+[Unit]
+Description=Check for an idle local Whisper container
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Persistent=true
+Unit=whisper-idle-stop.service
+
+[Install]
+WantedBy=timers.target

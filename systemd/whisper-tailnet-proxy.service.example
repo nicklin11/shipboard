@@ -1,0 +1,20 @@
+[Unit]
+Description=Tailnet-only on-demand proxy for the local Whisper container (example)
+After=docker.service tailscaled.service whisper-wake-proxy.service
+Wants=whisper-wake-proxy.service
+
+# Example: expose the local Whisper API to your Tailscale tailnet so other
+# devices can transcribe through your GPU. Adjust WHISPER_PROXY_HOST to this
+# machine's tailnet IP, pick a free port, and rename this file to
+# whisper-tailnet-proxy.service before enabling.
+
+[Service]
+Environment=WHISPER_PROXY_HOST=100.64.0.1
+Environment=WHISPER_PROXY_PORT=10301
+Environment=WHISPER_BACKEND_PORT=10302
+ExecStart=/usr/bin/python3 %h/.config/whisper-local/scripts/whisper_wake_proxy.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
