@@ -80,6 +80,10 @@ grace = 0.15
 
 # Dictation normalization: "тильда слэш точка конфиг" -> "~/.config"
 normalize = true
+
+# Optional initial prompt sent to whisper (helps with domain vocabulary,
+# e.g. "Короткие команды на русском и английском, термины: Docker, config").
+prompt = ""
 """
 
 
@@ -130,6 +134,7 @@ PASTE_COMBO = _cfg("paste_combo", "ALTER_TALK_PASTE_COMBO",
 SEND_ENTER = _cfg("send_enter", "ALTER_TALK_SEND_ENTER", True, _as_bool)
 DRY_RUN = _cfg("dry_run", "ALTER_TALK_DRY_RUN", False, _as_bool)
 NORMALIZE = _cfg("normalize", "ALTER_TALK_NORMALIZE", True, _as_bool)
+PROMPT = _cfg("prompt", "ALTER_TALK_PROMPT", "")
 
 _COMBO_KEYS = {
     "ctrl": 29,        # KEY_LEFTCTRL
@@ -241,7 +246,10 @@ def _ensure_server(timeout: float = 60.0) -> None:
 
 def transcribe(wav_path: Path) -> str:
     _ensure_server()
-    body, content_type = _multipart_body({"language": "auto"}, wav_path)
+    fields = {"language": "auto"}
+    if PROMPT:
+        fields["prompt"] = PROMPT
+    body, content_type = _multipart_body(fields, wav_path)
     req = urllib_request.Request(
         WHISPER_URL,
         data=body,
@@ -289,6 +297,7 @@ _SYMBOL_MAP = {
     # dash variants: whisper often transliterates these ("desh"/"defiz"/"tire")
     "дэш": "-", "деш": "-", "desh": "-", "defiz": "-",
     "тире": "-", "tire": "-", "tireh": "-",
+    "слэж": "/",
     # English
     "slash": "/", "dot": ".", "tilde": "~", "dash": "-", "hyphen": "-",
     "comma": ",", "colon": ":", "semicolon": ";", "equals": "=",
@@ -304,11 +313,6 @@ _TOKEN_RE = re.compile(
     ) + r")\b",
     re.IGNORECASE,
 )
-_COLLAPSE_RE = re.compile(
-    r"\s*([" + re.escape(
-        "".join(sorted(set(_SYMBOL_MAP.values()) - {" ", "\t"}))
-    ) + r"])\s*"
-)
 # whisper sometimes glues the spoken word to its neighbor ("deshtag",
 # "configdefizfile") — replace the token even as a word prefix then.
 _GLUE_DASH_RE = re.compile(
@@ -317,7 +321,8 @@ _GLUE_DASH_RE = re.compile(
 
 
 def normalize_text(text: str) -> str:
-    """Replace spoken punctuation names with symbols and glue them."""
+    """Spoken punctuation names -> symbols; command symbols glue, sentence
+    punctuation keeps normal spacing (\"Привет. Это\" vs \"~/.config\")."""
     if not NORMALIZE or not text:
         return text
     # whisper returns segments joined with newlines (VAD cuts the speech);
@@ -328,7 +333,15 @@ def normalize_text(text: str) -> str:
     # the model often writes hyphens around the spoken word; collapse the
     # resulting runs of 3+ (keep "--" — legitimate flag prefix)
     text = re.sub(r"-{3,}", "--", text)
-    text = _COLLAPSE_RE.sub(r"\1", text)
+    # command symbols (paths, flags, URLs): never surrounded by spaces
+    text = re.sub(r"\s*([~/_\-\@#*=\+:])\s*", r"\1", text)
+    # dot: glued before a lowercase letter/digit ("файл.пи", "~/.config"),
+    # sentence spacing otherwise ("Привет. Это")
+    text = re.sub(r"\.\s+(?=[a-zа-яё0-9])", ".", text)
+    text = re.sub(r"\s+\.", ".", text)
+    # sentence punctuation: no space before, single space after
+    text = re.sub(r"([,;!?])\s+", r"\1 ", text)
+    text = re.sub(r"\s+([,;!?])", r"\1", text)
     return text.strip()
 
 
@@ -776,6 +789,7 @@ _SETUP_FIELDS = [
     ("min_recording",      "Min recording, seconds",             float),
     ("grace",              "Both-keys window, seconds",          float),
     ("normalize",          "Dictation symbols (слэш/дэш/...) ",  bool),
+    ("prompt",             "Initial whisper prompt (optional)",  str),
 ]
 
 
@@ -790,6 +804,7 @@ def _field_defaults() -> dict:
         "min_recording": 0.5,
         "grace": 0.15,
         "normalize": True,
+        "prompt": "",
     }
 
 
@@ -1029,7 +1044,12 @@ def main() -> int:
         return _setup_main()
 
     parser = argparse.ArgumentParser(
-        description="alter-talk: voice daemon (Pause/Scroll Lock) + helpers."
+        description=(
+            "alter-talk: voice daemon (Pause/Scroll Lock) + helpers.\n"
+            "Subcommands: status (state), config (TOML editor), "
+            "setup (interactive TUI), --send (paste+Enter)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--send", action="store_true",

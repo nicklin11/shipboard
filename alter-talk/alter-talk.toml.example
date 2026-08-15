@@ -22,3 +22,6 @@ grace = 0.15
 
 # Dictation normalization: "тильда слэш точка конфиг" -> "~/.config"
 normalize = true
+
+# Optional initial prompt sent to whisper (domain vocabulary).
+# prompt = "Короткие команды на русском и английском, термины: Docker, config"
