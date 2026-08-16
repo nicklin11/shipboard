@@ -96,18 +96,14 @@ prompt = ""
 #   record_target = "alsa_input.pci-0000_00_1f.3.analog-stereo"
 record_target = "default"
 
-# Wake word listener (OpenWakeWord engine — work in progress).
-# Schema is ready; engine lands next. Keys keep working regardless.
+# Wake word listener (sherpa-onnx KWS).
 wakeword_enabled = false
-wakeword_model = "hey_jarvis"     # pretrained name or path to a .onnx
-wakeword_sensitivity = 0.5        # 0..1 detection threshold
 wakeword_cooldown = 2.0           # seconds between triggers
 wakeword_grace = 3.0              # keep recording through silence right after
                                   # a trigger, so you have time to start speaking
 wakeword_stop_silence = 1.5       # seconds of silence end the recording
 wakeword_action = "record"        # record (clipboard) | record_send (paste+Enter)
 wakeword_silence_level = 500      # RMS below this counts as silence (0..32768)
-wakeword_engine = "sherpa"        # sherpa (open-vocab phrases) | openwakeword
 wakeword_sherpa_score = 1.0       # sherpa KWS: boost for matched keywords
 wakeword_sherpa_threshold = 0.25  # sherpa KWS: trigger bar (lower=easier)
 # Wake phrases per action, comma-separated alternatives (at least two words
@@ -175,10 +171,6 @@ BOTH_SEND_ENTER = _cfg("both_send_enter", "SHIPBOARD_BOTH_SEND_ENTER",
 # Wake word listener (engine WIP — config schema is ready)
 WAKEWORD_ENABLED = _cfg("wakeword_enabled", "SHIPBOARD_WAKEWORD_ENABLED",
                         False, _as_bool)
-WAKEWORD_MODEL = _cfg("wakeword_model", "SHIPBOARD_WAKEWORD_MODEL",
-                      "hey_jarvis")
-WAKEWORD_SENSITIVITY = _cfg("wakeword_sensitivity",
-                            "SHIPBOARD_WAKEWORD_SENSITIVITY", 0.5, float)
 WAKEWORD_COOLDOWN = _cfg("wakeword_cooldown", "SHIPBOARD_WAKEWORD_COOLDOWN",
                          2.0, float)
 WAKEWORD_GRACE = _cfg("wakeword_grace", "SHIPBOARD_WAKEWORD_GRACE",
@@ -189,8 +181,6 @@ WAKEWORD_ACTION = _cfg("wakeword_action", "SHIPBOARD_WAKEWORD_ACTION",
                        "record")
 WAKEWORD_SILENCE_LEVEL = _cfg("wakeword_silence_level",
                               "SHIPBOARD_WAKEWORD_SILENCE_LEVEL", 500, float)
-WAKEWORD_ENGINE = _cfg("wakeword_engine", "SHIPBOARD_WAKEWORD_ENGINE",
-                       "sherpa")
 # Sherpa KWS firing knobs: score boosts matched keywords, threshold is the
 # bar they must clear (lower = easier to trigger, more false positives).
 WAKEWORD_SHERPA_SCORE = _cfg("wakeword_sherpa_score",
@@ -329,32 +319,6 @@ def _parse_keywords(spec: str) -> list[tuple[str, str]]:
     return out
 
 
-def _wake_model_path(name: str) -> Path:
-    p = Path(name).expanduser()
-    if p.is_file():
-        return p
-    if "/" in name or name.endswith(".onnx"):
-        return p
-    return _WAKE_MODELS_DIR / f"{name}.onnx"
-
-
-def _ensure_wake_model(path: Path, name: str) -> bool:
-    if path.is_file() and path.stat().st_size > 100_000:
-        return True
-    _WAKE_MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    url = (f"https://github.com/dscripka/openWakeWord/releases/"
-           f"download/v0.5.1/{name}_v0.1.onnx")
-    _log(f"wakeword: downloading {name} model ...")
-    try:
-        tmp = path.with_suffix(".onnx.tmp")
-        urllib_request.urlretrieve(url, tmp)
-        tmp.replace(path)
-        return path.stat().st_size > 100_000
-    except Exception as exc:
-        _log(f"wakeword: model download failed: {exc}")
-        return False
-
-
 def _ensure_sherpa_model() -> bool:
     needed = ["tokens.txt", "en.phone",
               "encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx",
@@ -485,34 +449,12 @@ class _SherpaKws:
         return "sherpa: " + ", ".join(p for p, _ in self.pairs)
 
 
-class _OwwDetector:
-    """OpenWakeWord single-model detector (fallback engine)."""
-
-    def __init__(self) -> None:
-        from openwakeword.model import Model
-        path = _wake_model_path(WAKEWORD_MODEL)
-        if not _ensure_wake_model(path, WAKEWORD_MODEL):
-            raise RuntimeError("no openwakeword model")
-        self.oww = Model(wakeword_model_paths=[str(path)])
-        self.key = path.stem
-
-    def feed(self, audio) -> str | None:
-        score = float(self.oww.predict(audio).get(self.key, 0.0))
-        return self.key if score >= WAKEWORD_SENSITIVITY else None
-
-    def action_for(self, phrase: str) -> str:
-        return WAKEWORD_ACTION
-
-    def describe(self) -> str:
-        return f"openwakeword: {WAKEWORD_MODEL}"
-
-
 def _wake_listen(self, stop_event: threading.Event) -> None:
     """Continuous listener: pw-cat -> detector -> record until silence."""
     # onnxruntime's intra-op threads busy-spin when idle (3 sessions =
     # encoder/decoder/joiner = ~3 cores of pure spin). Make them sleep.
     os.environ.setdefault("ORT_DISABLE_SPIN_WAIT", "1")
-    # OpenWakeWord/sherpa-onnx live in the shipboard venv; make them
+    # sherpa-onnx lives in the shipboard venv; make it
     # importable from the system python the daemon runs under.
     try:
         for sp in (_WAKE_VENV / "lib").glob("python*/site-packages"):
@@ -522,13 +464,10 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
         _log(f"wakeword: deps unavailable ({exc}) — listener off")
         return
     try:
-        if WAKEWORD_ENGINE == "sherpa":
-            if not _ensure_sherpa_model() or not _ensure_sherpa_keywords():
-                _log("wakeword: sherpa model/keywords unavailable — listener off")
-                return
-            detector: _SherpaKws | _OwwDetector = _SherpaKws()
-        else:
-            detector = _OwwDetector()
+        if not _ensure_sherpa_model() or not _ensure_sherpa_keywords():
+            _log("wakeword: sherpa model/keywords unavailable — listener off")
+            return
+        detector = _SherpaKws()
         _log(f"wakeword: listening ({detector.describe()})")
         _notify("shipboard", f"Wake word on: {detector.describe()}")
     except Exception as exc:
@@ -1212,7 +1151,7 @@ def _status_main() -> int:
           f"{'yes' if BOTH_SEND_ENTER else 'no'}"
           f" | grace {GRACE}s | max hold {MAX_HOLD}s | min rec {MIN_RECORDING}s")
     print(f"normalize: {'on' if NORMALIZE else 'off'}")
-    print(f"wakeword:  {'on (' + WAKEWORD_ENGINE + ')' if WAKEWORD_ENABLED else 'off'}")
+    print(f"wakeword:  {'on (sherpa)' if WAKEWORD_ENABLED else 'off'}")
     if WAKEWORD_ENABLED:
         print(f"           {WAKEWORD_KEYWORDS}")
     if RECORD_TARGET:
@@ -1271,13 +1210,10 @@ _SETUP_FIELDS = [
     ("normalize",          "Dictation symbols (слэш/дэш/...) ",  bool),
     ("prompt",             "Initial whisper prompt (optional)",  str),
     ("wakeword_enabled",   "Wake word listener (engine WIP)",    bool),
-    ("wakeword_model",     "Wake word model (pretrained)",       str),
-    ("wakeword_sensitivity", "Wake word sensitivity (0..1)",     float),
     ("wakeword_cooldown",  "Wake word cooldown, seconds",        float),
     ("wakeword_stop_silence", "Wake word stop on silence, s",    float),
     ("wakeword_action",    "Wake word action (record/record_send)", str),
     ("wakeword_silence_level", "Wake word silence RMS level",    float),
-    ("wakeword_engine",    "Wake word engine (sherpa/openwakeword)", str),
     ("wakeword_sherpa_score", "Sherpa KWS score boost (sensitivity)", float),
     ("wakeword_sherpa_threshold", "Sherpa KWS threshold (lower=easier)", float),
     ("wakeword_record",    "Wake word: record (copy only)",        str),
@@ -1303,13 +1239,10 @@ def _field_defaults() -> dict:
         "normalize": True,
         "prompt": "",
         "wakeword_enabled": False,
-        "wakeword_model": "hey_jarvis",
-        "wakeword_sensitivity": 0.5,
         "wakeword_cooldown": 2.0,
         "wakeword_stop_silence": 1.5,
         "wakeword_action": "record",
         "wakeword_silence_level": 500.0,
-        "wakeword_engine": "sherpa",
         "wakeword_sherpa_score": 1.0,
         "wakeword_sherpa_threshold": 0.25,
         "wakeword_record": "copy it, take it, grab it, catch it",
