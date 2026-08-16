@@ -8,19 +8,28 @@ Part of [shipboard](../README.md). Requires the local whisper.cpp server
 
 ## How it works
 
-The daemon reads `KEY_PAUSE` and `KEY_SCROLLLOCK` directly from evdev, so it
-works identically on any Wayland/X11 compositor (niri, Hyprland, sway, …) with
-no compositor-specific code. Key injection for the send modes uses a uinput
-virtual keyboard — modifier combos are layout-independent, so non-Latin text
-pastes correctly regardless of the active layout.
+The daemon reads evdev keys directly (defaults: `KEY_PAUSE` for record,
+`KEY_SCROLLLOCK` for send), so it works identically on any Wayland/X11
+compositor (niri, Hyprland, sway, …) with no compositor-specific code. The
+triggers are configurable via `key_record` / `key_send` / `key_record_send`
+(evdev key names, e.g. `insert`, `home`, `f13`; empty string disables a
+trigger). Key injection for the send modes uses a uinput virtual keyboard —
+modifier combos are layout-independent, so non-Latin text pastes correctly
+regardless of the active layout.
 
 ## Modes
 
-- **Pause held** — record → whisper → `wl-copy` (clipboard only)
-- **Scroll Lock tap** — paste current clipboard + Enter (send only)
-- **Pause + Scroll Lock** — record → whisper → clipboard → paste → Enter
-  (auto-send after recognition). The keys can be pressed in either order; a
-  150 ms grace window catches near-simultaneous presses.
+- **Record key held** (default: **Pause**) — record → whisper → `wl-copy`
+  (clipboard only). With `key_record_mode = "toggle"`, press to start
+  recording and press again to stop and process.
+- **Send key tap** (default: **Scroll Lock**) — paste current clipboard +
+  Enter (send only).
+- **Record + send keys** (default: **Pause + Scroll Lock**) — record →
+  whisper → clipboard → paste → Enter (auto-send after recognition). The keys
+  can be pressed in either order; a 150 ms grace window catches
+  near-simultaneous presses.
+- **Optional third key** (`key_record_send`) — record → clipboard → paste +
+  Enter in one go, while held.
 
 Notifications: Recording… / Processing speech… / Copied… / Sent…
 
@@ -29,7 +38,7 @@ Notifications: Recording… / Processing speech… / Copied… / Sent…
 After transcription the text is normalized: spoken punctuation names become
 symbols and get glued to neighbors (`тильда слэш точка конфиг` →
 `~/.config`, `alt dash talk` → `alt-talk`). Russian and English names are
-supported. Disable with `ALTER_TALK_NORMALIZE=0`.
+supported. Disable with `SHIPBOARD_NORMALIZE=0`.
 
 ## Run
 
@@ -55,7 +64,7 @@ keys so they never reach the focused app (kitty encodes unbound keys as
 
 Settings come from, in order of precedence: built-in defaults < the TOML
 config file (<code>~/.config/shipboard/shipboard.toml</code>) <
-environment variables (<code>ALTER_TALK_*</code>).
+environment variables (<code>SHIPBOARD_*</code>).
 
 ```bash
 shipboard setup   # TUI: edit settings, test STT, compositor snippets,
@@ -74,11 +83,28 @@ machine's GPU (see the parent README's Remote use section).
 ```bash
 shipboard --send                 # one-shot paste + Enter (refuses while recording)
 shipboard --file /tmp/x.wav      # transcribe an existing file
-ALTER_TALK_DRY_RUN=1 shipboard --send   # print instead of injecting
+SHIPBOARD_DRY_RUN=1 shipboard --send   # print instead of injecting
 ```
 
 ## Config
 
-See the env table in the parent README (`ALTER_TALK_*` variables). The paste
-combo defaults to `ctrl+shift+v` (kitty/browser); set
-`ALTER_TALK_PASTE_COMBO=ctrl+v` if your target app wants plain Ctrl+V.
+See the env/TOML table in the parent README (`SHIPBOARD_*` variables and the
+matching TOML keys). Highlights:
+
+- **Triggers** — `key_record` (default `pause`), `key_send` (default
+  `scrolllock`), optional `key_record_send`; any of them empty = that trigger
+  is disabled. `key_record_mode` is `hold` (record while held) or `toggle`
+  (press to start / press again to stop).
+- **Paste combo** — `paste_combo` defaults to `ctrl+shift+v` (kitty/browser);
+  modifiers `ctrl`/`shift`/`alt`/`super` plus a final key from `a`–`z`,
+  `0`–`9`, `f1`–`f24`, `v`, `insert`, `enter`, `space`, `tab`, `home`, `end`,
+  `pageup`, `pagedown`, `delete`, `backspace` — e.g. set
+  `SHIPBOARD_PASTE_COMBO=ctrl+v` if your target app wants plain Ctrl+V.
+- **Enter flags** — `send_enter` is the global default; `scroll_send_enter`
+  and `both_send_enter` override it per trigger (all three default on).
+- **Recording** — `max_hold` caps recording length in seconds (single value,
+  stuck-key guard); `record_rate` / `record_channels` control the
+  `pw-record` input (defaults 16000 Hz / 1 ch).
+- **Platform** — `whisper_language` is the language hint sent to the STT
+  server (`auto`/`ru`/`en`/…, `auto` by default); `kws_threads` sets the
+  wake-word (sherpa KWS) onnxruntime thread count (default 2).
