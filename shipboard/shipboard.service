@@ -1,10 +1,10 @@
 [Unit]
-Description=alter-talk voice input daemon (Pause / Scroll Lock)
+Description=shipboard voice input daemon (Pause / Scroll Lock)
 After=pipewire.socket
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/alter-talk
+ExecStart=%h/.local/bin/shipboard
 Restart=always
 RestartSec=2
 

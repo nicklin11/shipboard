@@ -84,10 +84,36 @@ The installed `shipboard` binary manages the daemon from the command line:
 | `shipboard daemon` (alias: `start`) | run the daemon detached (reports if it's already running) |
 | `shipboard stop` | SIGTERM to all daemon processes |
 | `shipboard restart` | restart via systemd, else respawn detached |
-| `shipboard setup` | interactive TUI: configure + write keybinds |
-| `shipboard status` | print daemon / whisper state |
+| `shipboard status` | print daemon / STT / keys / wake-word state |
+| `shipboard setup` | numbered CLI dialog over all settings (sections: STT, Recording, Send, Keys, Wake words, Platform) |
+| `shipboard tui` (alias: `setup-tui`) | full-screen curses setup: `↑/↓` navigate · `Enter` edit · `s` save · `t` test STT · `p` compositor bind snippets · `r` restart daemon · `q` quit |
 | `shipboard config` | interactive TOML editor |
-| `shipboard --send` | one-shot paste clipboard + Enter |
+| `shipboard --send` | one-shot paste clipboard + Enter (no daemon) |
+| `shipboard --seconds N` | record for a fixed N seconds, then transcribe (one-shot) |
+| `shipboard --file PATH` | transcribe an existing audio file to the clipboard (one-shot) |
+| `shipboard --no-copy` | print the transcript instead of copying (with `--file`/`--seconds`) |
+
+`shipboard daemon` is the explicit way to run as a daemon without systemd —
+the process detaches and keeps running until `shipboard stop`. For a
+login-managed service, install the unit instead (see Quick start).
+
+### Running as a daemon
+
+Either way works; the CLI commands accept both:
+
+```bash
+# 1. Plain daemon (no systemd) — survives until stopped:
+shipboard daemon          # or: shipboard start
+shipboard status
+shipboard stop
+
+# 2. systemd user service (auto-start on login, auto-restart):
+systemctl --user enable --now shipboard
+```
+
+The `setup` / `tui` dialogs write `~/.config/shipboard/shipboard.toml` and
+print the compositor keybind snippets needed so Pause / Scroll Lock don't
+leak into focused apps (see Troubleshooting).
 
 ## shipboard usage
 
@@ -124,6 +150,41 @@ Config (env vars or TOML):
 | `record_channels` | `SHIPBOARD_RECORD_CHANNELS` | `1` | pw-record channel count |
 | `kws_threads` | `SHIPBOARD_KWS_THREADS` | `2` | wake-word (sherpa KWS) onnxruntime threads |
 | `normalize` | `SHIPBOARD_NORMALIZE` | `1` | dictation normalization: spoken punctuation names become glued symbols (`тильда слэш точка конфиг` → `~/.config`) |
+| `record_target` | `SHIPBOARD_RECORD_TARGET` | `""` | record source for pw-record (`default`/empty = system default, or a device name like `alsa_input.pci-...analog-stereo`) |
+| `prompt` | `SHIPBOARD_PROMPT` | `""` | optional initial prompt sent to whisper (domain vocabulary) |
+
+### Wake words
+
+Optional hands-free trigger: a sherpa-onnx KWS listener that starts recording
+when it hears a phrase. Configurable from `shipboard setup` (Wake words
+section) or the TOML file:
+
+| Option | Env var | Default | Meaning |
+|---|---|---|---|
+| `wakeword_enabled` | `SHIPBOARD_WAKEWORD_ENABLED` | `0` | enable the wake-word listener |
+| `wakeword_keywords` | `SHIPBOARD_WAKEWORD_KEYWORDS` | *(see example)* | `phrase:action` pairs, e.g. `"alter capture:record, alter send:record_send"` |
+| `wakeword_cooldown` | `SHIPBOARD_WAKEWORD_COOLDOWN` | `2.0` | seconds between triggers |
+| `wakeword_grace` | `SHIPBOARD_WAKEWORD_GRACE` | `3.0` | keep recording through silence right after a trigger |
+| `wakeword_stop_silence` | `SHIPBOARD_WAKEWORD_STOP_SILENCE` | `1.5` | seconds of silence end the recording |
+| `wakeword_silence_level` | `SHIPBOARD_WAKEWORD_SILENCE_LEVEL` | `500` | RMS below this counts as silence |
+
+### Platform backends
+
+The daemon picks the best backend for the running session automatically; each
+can be pinned in the TOML file (Platform section of `shipboard setup`):
+
+| Option | Default | Meaning |
+|---|---|---|
+| `inject_backend` | `auto` | key injection: `auto` / `uinput` / `wtype` / `pynput` |
+| `notify_backend` | `auto` | notifications: `auto` / `notify-send` / `osascript` / `powershell` |
+| `clipboard_backend` | `auto` | clipboard: `auto` / `wl-copy` / `xclip` / `pbcopy` / `clip` |
+| `record_backend` | `auto` | recording: `auto` / `pw-record` / `ffmpeg` |
+| `input_device_glob` | `""` | evdev device glob, e.g. `/dev/input/event*` |
+| `keep_audio_dir` | `""` | keep recordings in this dir instead of deleting them |
+| `dry_run` | `0` | log actions without performing them |
+
+Key listening is Linux evdev; injection/clipboard/notifications also have
+macOS and Windows backends behind the same neutral API.
 
 Key names are evdev names from `linux/input-event-codes.h` (e.g. `pause`,
 `scrolllock`, `insert`, `home`, `f13`). Setting `key_record` / `key_send` /
@@ -199,4 +260,6 @@ the container stops after `WHISPER_IDLE_SECONDS` (default 300) of no requests.
 
 ## License
 
-MIT
+shipboard is **source-available, non-commercial**: you may freely use, modify,
+and distribute it for non-commercial purposes. **Commercial use requires a
+paid license** from the author — see [LICENSE](LICENSE) for the full terms.

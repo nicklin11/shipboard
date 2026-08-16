@@ -1,5 +1,5 @@
 # shipboard configuration
-# Precedence: defaults < this file < environment variables (ALTER_TALK_*).
+# Precedence: defaults < this file < environment variables (SHIPBOARD_*).
 # Generate your own copy with: shipboard config
 # (default location: ~/.config/shipboard/shipboard.toml)
 

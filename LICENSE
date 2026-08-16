@@ -1,16 +1,23 @@
-MIT License
+shipboard Non-Commercial License
 
-Copyright (c) 2026 nicklin11
+Copyright (c) 2026 nicklin11 (the "Author")
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+of this software and associated documentation files (the "Software"), to use,
+copy, modify, merge, and distribute the Software for non-commercial purposes
+only, subject to the following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Non-commercial use — personal, educational, research, or any other use
+   that is not intended for or directed toward commercial advantage or
+   monetary compensation — is permitted without restriction, provided that
+   the above copyright notice and this permission notice are included in all
+   copies or substantial portions of the Software.
+
+2. Commercial use — any use of the Software by or on behalf of a commercial
+   entity, or any use intended for commercial advantage or monetary
+   compensation — requires a separate commercial license agreement with the
+   Author and payment of a mutually agreed licensing fee. Contact the Author
+   (https://github.com/nicklin11) to obtain a commercial license.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
