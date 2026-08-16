@@ -5,17 +5,15 @@ input daemon for agent TUIs.
 
 A whisper.cpp server that **sleeps when idle** (frees ~1.5 GiB of VRAM) and
 **wakes on the first request**, paired with `shipboard` — a compositor-agnostic
-daemon that turns Pause / Scroll Lock into:
+daemon that turns keys (Pause / Scroll Lock by default) into:
 
-| Keys | What happens |
+| Keys (defaults) | What happens |
 |---|---|
 | **Pause** (hold) | record → whisper → clipboard |
 | **Scroll Lock** (tap) | paste clipboard → Enter (send) |
 | **Pause + Scroll Lock** | record → whisper → clipboard → paste → Enter (auto-send) |
 
-The triggers are configurable evdev keys (`key_record` / `key_send`, and an
-optional third `key_record_send`), and the record trigger can be `hold`- or
-`toggle`-based (`key_record_mode`).
+All triggers are configurable evdev keys — see [Keys](#keys).
 
 Everything runs locally — no cloud, no audio leaves your machine.
 
@@ -117,6 +115,34 @@ leak into focused apps (see Troubleshooting).
 
 ## shipboard usage
 
+### Keys
+
+The daemon reads keys straight from evdev — no compositor binds are needed
+(the compositor only has to swallow them so they don't leak into apps, see
+Troubleshooting). All three triggers are configurable:
+
+| Setting | Default | Mode | Action |
+|---|---|---|---|
+| `key_record` | `pause` | hold / toggle | record → whisper → clipboard |
+| `key_send` | `scrolllock` | tap | paste clipboard → Enter (send) |
+| `key_record_send` | *(disabled)* | hold | record → whisper → clipboard → paste + Enter (one key) |
+
+- `key_record_mode = "hold"` records while the key is held; `"toggle"`
+  starts recording on press and stops on the next press.
+- Holding `key_record` and pressing `key_send` (any order, within `grace`,
+  0.15 s by default) records and auto-sends: record → whisper → clipboard →
+  paste + Enter.
+- Setting a key to an empty string (`""`) disables that trigger.
+
+Key names are evdev names from `linux/input-event-codes.h`, with or without
+the `KEY_` prefix — `pause`, `KEY_PAUSE`, `scrolllock`, `insert`, `home`,
+`f13`, … Change them in `shipboard setup` (Keys section), in
+`shipboard.toml`, or via env vars `SHIPBOARD_KEY_RECORD` /
+`SHIPBOARD_KEY_SEND` / `SHIPBOARD_KEY_RECORD_SEND` /
+`SHIPBOARD_KEY_RECORD_MODE`.
+
+### Behaviour
+
 - Hold **Pause**, speak, release → transcript lands in the clipboard
   (notifications: Запись → Обработка голоса → Скопировано).
 - Tap **Scroll Lock** → the current clipboard is pasted and Enter is pressed.
@@ -135,7 +161,7 @@ Config (env vars or TOML):
 | `whisper_health_url` | `WHISPER_CPP_HEALTH_URL` | `http://127.0.0.1:10300/health` | health endpoint |
 | `whisper_container` | `WHISPER_CONTAINER` | `whisper-local` | container to wake |
 | `whisper_language` | `SHIPBOARD_WHISPER_LANGUAGE` | `auto` | language hint sent to whisper (`auto`/`ru`/`en`/…) |
-| `key_record` | `SHIPBOARD_KEY_RECORD` | `pause` | record trigger, evdev key name (see below); empty = trigger disabled |
+| `key_record` | `SHIPBOARD_KEY_RECORD` | `pause` | record trigger, evdev key name (see [Keys](#keys)); empty = trigger disabled |
 | `key_send` | `SHIPBOARD_KEY_SEND` | `scrolllock` | send trigger, evdev key name; empty = trigger disabled |
 | `key_record_send` | `SHIPBOARD_KEY_RECORD_SEND` | `""` | optional third trigger: record → whisper → clipboard → paste + Enter in one go |
 | `key_record_mode` | `SHIPBOARD_KEY_RECORD_MODE` | `hold` | `hold` = record while held, `toggle` = press to start / press again to stop |
@@ -185,10 +211,6 @@ can be pinned in the TOML file (Platform section of `shipboard setup`):
 
 Key listening is Linux evdev; injection/clipboard/notifications also have
 macOS and Windows backends behind the same neutral API.
-
-Key names are evdev names from `linux/input-event-codes.h` (e.g. `pause`,
-`scrolllock`, `insert`, `home`, `f13`). Setting `key_record` / `key_send` /
-`key_record_send` to an empty string disables that trigger.
 
 `paste_combo` is a `+`-separated combo: one or more modifiers
 (`ctrl`/`shift`/`alt`/`super`) followed by a final key from letters `a`–`z`,
