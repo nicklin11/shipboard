@@ -44,8 +44,6 @@ from urllib import request as urllib_request
 # --------------------------------------------------------------------------
 # Configuration: defaults < TOML config file < environment variables
 # --------------------------------------------------------------------------
-KEY_PAUSE = 119       # linux/input-event-codes.h: KEY_PAUSE
-KEY_SCROLLLOCK = 70   # KEY_SCROLLLOCK
 KEY_V = 47            # KEY_V
 KEY_INSERT = 110      # KEY_INSERT
 KEY_ENTER = 28        # KEY_ENTER
@@ -71,6 +69,11 @@ whisper_container = "whisper-local"
 # Recording
 max_hold = 60          # seconds; force-finish a stuck recording
 min_recording = 0.5    # seconds; shorter recordings are discarded
+
+# Keys the daemon listens on (evdev names, see linux/input-event-codes.h:
+# pause, scrolllock, insert, home, f13, ...). Defaults: Pause/ScrollLock.
+key_record = "pause"
+key_send = "scrolllock"
 
 # Send mode (Scroll Lock / both keys)
 paste_combo = "ctrl+shift+v"   # injected as a modifier combo (layout-proof)
@@ -143,6 +146,36 @@ def _as_bool(v) -> bool:
     return str(v).lower() in ("1", "true", "yes", "on")
 
 
+_KEY_CODE_CACHE: dict[str, int] = {}
+
+
+def _key_code(name: str) -> int:
+    """evdev key name ('pause', 'scrolllock', 'f13', ...) -> input code."""
+    code = _KEY_CODE_CACHE.get(name)
+    if code is not None:
+        return code
+    import evdev
+
+    try:
+        code = int(getattr(evdev.ecodes, f"KEY_{name.upper()}"))
+    except AttributeError as exc:
+        raise SystemExit(f"shipboard: unknown key name {name!r}") from exc
+    _KEY_CODE_CACHE[name] = code
+    return code
+
+
+_KEY_LABELS = {
+    "pause": "Pause", "scrolllock": "Scroll Lock", "insert": "Insert",
+    "home": "Home", "end": "End", "pageup": "Page Up", "pagedown": "Page Down",
+    "delete": "Delete", "f13": "F13", "f14": "F14", "f15": "F15",
+    "f16": "F16", "f17": "F17", "f18": "F18", "f19": "F19", "f20": "F20",
+}
+
+
+def _key_label(name: str) -> str:
+    return _KEY_LABELS.get(name, name.replace("_", " ").title())
+
+
 WHISPER_URL = _cfg("whisper_url", "WHISPER_CPP_URL",
                    "http://127.0.0.1:10300/inference")
 HEALTH_URL = _cfg("whisper_health_url", "WHISPER_CPP_HEALTH_URL",
@@ -154,6 +187,8 @@ IDLE_MARKER = Path(_cfg("idle_marker", "WHISPER_IDLE_MARKER",
 MAX_HOLD = _cfg("max_hold", "SHIPBOARD_MAX_HOLD", 60.0, float)
 MIN_RECORDING = _cfg("min_recording", "SHIPBOARD_MIN_RECORDING", 0.5, float)
 GRACE = _cfg("grace", "SHIPBOARD_GRACE", 0.15, float)  # SL->Pause window
+KEY_RECORD = _cfg("key_record", "SHIPBOARD_KEY_RECORD", "pause")
+KEY_SEND = _cfg("key_send", "SHIPBOARD_KEY_SEND", "scrolllock")
 RATE = 16000
 CHANNELS = 1
 LOCK_PATH = Path(_cfg("lock_path", "SHIPBOARD_LOCK", "/tmp/shipboard.lock"))
@@ -826,7 +861,7 @@ def _watch_devices():
             dev = evdev.InputDevice(path)
             caps = dev.capabilities(verbose=False)
             keys = caps.get(evdev.ecodes.EV_KEY, [])
-            if KEY_PAUSE in keys or KEY_SCROLLLOCK in keys:
+            if (_key_code(KEY_RECORD) in keys or _key_code(KEY_SEND) in keys):
                 devices.append(dev)
         except Exception:
             continue
@@ -861,7 +896,7 @@ def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
         wav_path = tmp_dir / "rec.wav"
         _notify(
             "shipboard",
-            "Recording... (hold Pause)"
+            f"Recording... (hold {_key_label(KEY_RECORD)})"
             + (" — release: will paste and send" if autosend else ""),
         )
         proc = start_recording(wav_path)
@@ -883,7 +918,7 @@ def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
                         for event in dev.read():
                             if (
                                 event.type == evdev.ecodes.EV_KEY
-                                and event.code == KEY_PAUSE
+                                and event.code == _key_code(KEY_RECORD)
                                 and event.value == 0  # release
                             ):
                                 held = True
@@ -958,7 +993,7 @@ class _Daemon:
         self._tmp_dir = tmp_dir
         _write_state(state="recording")
         _log(f"record start -> {wav}")
-        _notify("shipboard", "Recording... (hold Pause)")
+        _notify("shipboard", f"Recording... (hold {_key_label(KEY_RECORD)})")
 
     def _finish_record(self, from_wake: bool = False) -> None:
         if not self.recording or self.rec_proc is None:
@@ -1097,11 +1132,11 @@ class _Daemon:
                             continue
                         if event.value == 2:  # auto-repeat
                             continue
-                        if event.code == KEY_PAUSE:
+                        if event.code == _key_code(KEY_RECORD):
                             if event.value == 1:
                                 self.pause_down = True
                             self._on_pause(event.value)
-                        elif event.code == KEY_SCROLLLOCK:
+                        elif event.code == _key_code(KEY_SEND):
                             self._on_scrolllock(event.value)
                 except (OSError, ValueError):
                     devices = [d for d in devices if d != dev]
@@ -1144,9 +1179,10 @@ def _status_main() -> int:
     print(f"daemon:    {'running' if _daemon_running() else 'stopped'}")
     print(f"config:    {DEFAULT_CONFIG_PATH}")
     print(f"stt:       {WHISPER_URL}")
-    print("keys:      Pause = record->clipboard | Scroll Lock = paste+Enter |"
-          " both = record->paste+Enter")
-    print(f"paste:     {PASTE_COMBO} | Scroll Lock Enter: "
+    rl, sl = _key_label(KEY_RECORD), _key_label(KEY_SEND)
+    print(f"keys:      {rl} = record->clipboard | {sl} = paste+Enter |"
+          f" both = record->paste+Enter")
+    print(f"paste:     {PASTE_COMBO} | {sl} Enter: "
           f"{'yes' if SCROLL_SEND_ENTER else 'no'} | both Enter: "
           f"{'yes' if BOTH_SEND_ENTER else 'no'}"
           f" | grace {GRACE}s | max hold {MAX_HOLD}s | min rec {MIN_RECORDING}s")
@@ -1207,6 +1243,8 @@ _SETUP_FIELDS = [
     ("max_hold",           "Max hold, seconds (stuck guard)",    float),
     ("min_recording",      "Min recording, seconds",             float),
     ("grace",              "Both-keys window, seconds",          float),
+    ("key_record",         "Record key (evdev name, e.g. pause)", str),
+    ("key_send",           "Send key (evdev name, e.g. scrolllock)", str),
     ("normalize",          "Dictation symbols (слэш/дэш/...) ",  bool),
     ("prompt",             "Initial whisper prompt (optional)",  str),
     ("wakeword_enabled",   "Wake word listener (engine WIP)",    bool),
@@ -1236,6 +1274,8 @@ def _field_defaults() -> dict:
         "max_hold": 60.0,
         "min_recording": 0.5,
         "grace": 0.15,
+        "key_record": "pause",
+        "key_send": "scrolllock",
         "normalize": True,
         "prompt": "",
         "wakeword_enabled": False,
