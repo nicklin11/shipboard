@@ -949,95 +949,70 @@ Hyprland:
 """
 
 
-def _tui_loop(stdscr) -> int:
-    import curses
-
-    curses.curs_set(0)
+def _setup_main() -> int:
+    """Interactive CLI menu (no curses — inherits the terminal theme)."""
     values = _field_defaults()
     values.update(_CFG)
-    selected = 0
-    editing = False
-    edit_buf = ""
-    message = "j/k or arrows: move · Enter: edit · Space: toggle · s: save · t: test STT · p: snippets · r: restart · q: quit"
-
-    def draw() -> None:
-        stdscr.erase()
-        h, w = stdscr.getmaxyx()
-        title = f" alter-talk setup — {DEFAULT_CONFIG_PATH} "
-        stdscr.addstr(0, 0, title[:w - 1], curses.A_REVERSE)
-        for i, (key, label, conv) in enumerate(_SETUP_FIELDS):
-            if i + 1 >= h - 4:
-                break
-            line = f" {i + 1:2}) {label:<40} {_fmt_value(values[key])}"
-            attr = curses.A_REVERSE if i == selected else 0
-            stdscr.addstr(i + 1, 0, line[:w - 1], attr)
-        stdscr.addstr(h - 3, 0, message[:w - 1])
-        if editing:
-            stdscr.addstr(h - 2, 0, "> " + edit_buf[:w - 3])
-        stdscr.refresh()
-
-    draw()
+    message = ""
     while True:
-        ch = stdscr.getch()
-        if editing:
-            if ch in (10, 13, curses.KEY_ENTER):  # commit
-                key, _label, conv = _SETUP_FIELDS[selected]
-                try:
-                    values[key] = _parse_value(edit_buf, conv)
-                    message = f"{key} = {_fmt_value(values[key])}"
-                except ValueError:
-                    message = "invalid value, not saved"
-                editing = False
-            elif ch in (27,):  # escape
-                editing = False
-                message = "edit cancelled"
-            elif ch in (8, 127, curses.KEY_BACKSPACE):
-                edit_buf = edit_buf[:-1]
-            elif 32 <= ch < 127:
-                edit_buf += chr(ch)
-            draw()
-            continue
-        if ch in (ord("q"), 27):
+        print("\n" + "─" * 60)
+        print(f" alter-talk setup — {DEFAULT_CONFIG_PATH}")
+        print("─" * 60)
+        for i, (key, label, conv) in enumerate(_SETUP_FIELDS, start=1):
+            mark = "*" if key in _CFG else " "
+            print(f" {i:2}) {mark} {label:<40} {_fmt_value(values[key])}")
+        print("─" * 60)
+        print(" [num] edit · [s] save · [t] test STT · [p] compositor binds"
+              " · [r] restart daemon · [q] quit")
+        if message:
+            print(f" {message}")
+        try:
+            choice = input(" > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
             return 0
-        if ch in (ord("j"), curses.KEY_DOWN):
-            selected = min(selected + 1, len(_SETUP_FIELDS) - 1)
-        elif ch in (ord("k"), curses.KEY_UP):
-            selected = max(selected - 1, 0)
-        elif ch in (10, 13, curses.KEY_ENTER):
-            key, _label, conv = _SETUP_FIELDS[selected]
-            if conv is bool:
-                values[key] = not values[key]
-                message = f"{key} = {_fmt_value(values[key])}"
-            else:
-                editing = True
-                edit_buf = _fmt_value(values[key])
-        elif ch == ord(" "):
-            key, _label, conv = _SETUP_FIELDS[selected]
-            if conv is bool:
-                values[key] = not values[key]
-        elif ch == ord("s"):
+        message = ""
+        if choice in ("q", "quit", "exit"):
+            return 0
+        if choice == "s":
             _save_config_file(values)
-            message = "saved. Restart the daemon to apply (r)."
-        elif ch == ord("t"):
-            message = "testing STT: " + _health_check(values["whisper_health_url"])
-        elif ch == ord("p"):
-            sh, sw = stdscr.getmaxyx()
-            stdscr.erase()
-            stdscr.addstr(0, 0, "Compositor keybind snippets (press any key)", curses.A_REVERSE)
-            for i, line in enumerate(_COMPOSITOR_SNIPPETS.splitlines(), start=1):
-                stdscr.addstr(i, 0, line[: sw - 1])
-            stdscr.getch()
-            draw()
-            continue
-        elif ch == ord("r"):
+            message = f"saved to {DEFAULT_CONFIG_PATH} — restart the daemon to apply (r)"
+        elif choice == "t":
+            message = "STT health: " + _health_check(values["whisper_health_url"])
+        elif choice == "p":
+            print("\n" + _COMPOSITOR_SNIPPETS)
+            input(" [press Enter to return] ")
+        elif choice == "r":
             message = _restart_daemon()
-        draw()
-
-
-def _setup_main() -> int:
-    import curses
-
-    return curses.wrapper(_tui_loop)
+        elif choice.isdigit():
+            i = int(choice) - 1
+            if 0 <= i < len(_SETUP_FIELDS):
+                key, label, conv = _SETUP_FIELDS[i]
+                cur = _fmt_value(values[key])
+                if conv is bool:
+                    ans = input(f" {label} [{cur}] (y/n, Enter=keep): ").strip().lower()
+                    if ans in ("y", "yes", "on", "1"):
+                        values[key] = True
+                        message = f"{key} = yes"
+                    elif ans in ("n", "no", "off", "0"):
+                        values[key] = False
+                        message = f"{key} = no"
+                    else:
+                        message = f"{key} unchanged"
+                else:
+                    raw = input(f" {label} [{cur}] > ").strip()
+                    if not raw:
+                        message = f"{key} unchanged"
+                    else:
+                        try:
+                            values[key] = _parse_value(raw, conv)
+                            message = f"{key} = {_fmt_value(values[key])}"
+                        except ValueError:
+                            message = "invalid value, not saved"
+            else:
+                message = "no such field"
+        else:
+            message = f"unknown command: {choice}"
 
 
 # --------------------------------------------------------------------------
