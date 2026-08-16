@@ -1516,9 +1516,11 @@ def _tui_main() -> int:
     _setup_prefill(values)
 
     rows = []  # ("section", name) | ("field", _SETUP_FIELDS index)
+    last_section = None
     for i, (key, label, conv, section) in enumerate(_SETUP_FIELDS):
-        if not rows or rows[-1] != ("section", section):
+        if section != last_section:
             rows.append(("section", section))
+            last_section = section
         rows.append(("field", i))
 
     def _next_field(sel: int, step: int) -> int:
@@ -1545,7 +1547,7 @@ def _tui_main() -> int:
         curses.doupdate()
         while True:
             ch = stdscr.getch()
-            if ch in (ord("q"), ord("Q"), 27, curses.KEY_ESCAPE):
+            if ch in (ord("q"), ord("Q"), 27):
                 break
 
     def _edit_field(stdscr, sel: int, message: str) -> str:
@@ -1566,7 +1568,7 @@ def _tui_main() -> int:
                 pass
             while True:
                 ch = stdscr.getch()
-                if ch in (27, curses.KEY_ESCAPE):
+                if ch in (27,):
                     break
                 if ch == ord(" "):
                     values[key] = not values[key]
@@ -1589,7 +1591,7 @@ def _tui_main() -> int:
                 except curses.error:
                     pass
                 ch = stdscr.getch()
-                if ch in (27, curses.KEY_ESCAPE):
+                if ch in (27,):
                     break
                 if ch in (10, 13, curses.KEY_ENTER):
                     try:
@@ -1619,6 +1621,9 @@ def _tui_main() -> int:
         except curses.error:
             pass
         sel, scroll = 0, 0
+        # Start on the first field, not a section header.
+        while sel < len(rows) and rows[sel][0] != "field":
+            sel += 1
         message = "↑/↓ navigate · Enter edit · s save · t test STT · p binds · r restart · q quit"
         while True:
             stdscr.erase()
@@ -1649,7 +1654,8 @@ def _tui_main() -> int:
                     else:
                         key, label, conv, _section = _SETUP_FIELDS[payload]
                         mark = "*" if key in _CFG else " "
-                        attrs = curses.A_REVERSE if payload == sel else 0
+                        selected = kind == "field" and payload == rows[sel][1]
+                        attrs = curses.A_REVERSE if selected else 0
                         stdscr.addnstr(yy, 0,
                                        f" {mark} {label:<46} {_fmt_value(values[key])}",
                                        w - 1, attrs)
