@@ -33,6 +33,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -101,6 +102,8 @@ wakeword_sensitivity = 0.5        # 0..1 detection threshold
 wakeword_cooldown = 2.0           # seconds between triggers
 wakeword_max_record = 30.0        # cap for recording after a trigger
 wakeword_stop_silence = 1.5       # seconds of silence end the recording
+wakeword_action = "record"        # record (clipboard) | record_send (paste+Enter)
+wakeword_silence_level = 500      # RMS below this counts as silence (0..32768)
 """
 
 
@@ -167,6 +170,10 @@ WAKEWORD_MAX_RECORD = _cfg("wakeword_max_record",
                            "ALTER_TALK_WAKEWORD_MAX_RECORD", 30.0, float)
 WAKEWORD_STOP_SILENCE = _cfg("wakeword_stop_silence",
                              "ALTER_TALK_WAKEWORD_STOP_SILENCE", 1.5, float)
+WAKEWORD_ACTION = _cfg("wakeword_action", "ALTER_TALK_WAKEWORD_ACTION",
+                       "record")
+WAKEWORD_SILENCE_LEVEL = _cfg("wakeword_silence_level",
+                              "ALTER_TALK_WAKEWORD_SILENCE_LEVEL", 500, float)
 DRY_RUN = _cfg("dry_run", "ALTER_TALK_DRY_RUN", False, _as_bool)
 NORMALIZE = _cfg("normalize", "ALTER_TALK_NORMALIZE", True, _as_bool)
 PROMPT = _cfg("prompt", "ALTER_TALK_PROMPT", "")
@@ -234,6 +241,128 @@ def stop_recording(proc: subprocess.Popen) -> None:
             proc.kill()
         except ProcessLookupError:
             pass
+
+
+# --------------------------------------------------------------------------
+# Wake word listener (OpenWakeWord, streaming via parec)
+# --------------------------------------------------------------------------
+_WAKE_MODELS_DIR = Path.home() / ".local/share/alter-talk/models"
+_WAKE_VENV = Path.home() / ".local/share/alter-talk-venv"
+_WAKE_SILENCE_RMS = WAKEWORD_SILENCE_LEVEL / 32768.0
+
+
+def _wake_model_path(name: str) -> Path:
+    p = Path(name).expanduser()
+    if p.is_file():
+        return p
+    if "/" in name or name.endswith(".onnx"):
+        return p
+    return _WAKE_MODELS_DIR / f"{name}.onnx"
+
+
+def _ensure_wake_model(path: Path, name: str) -> bool:
+    if path.is_file() and path.stat().st_size > 100_000:
+        return True
+    _WAKE_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    url = (f"https://github.com/dscripka/openWakeWord/releases/"
+           f"download/v0.5.1/{name}_v0.1.onnx")
+    _log(f"wakeword: downloading {name} model ...")
+    try:
+        tmp = path.with_suffix(".onnx.tmp")
+        urllib_request.urlretrieve(url, tmp)
+        tmp.replace(path)
+        return path.stat().st_size > 100_000
+    except Exception as exc:
+        _log(f"wakeword: model download failed: {exc}")
+        return False
+
+
+def _wake_listen(self, stop_event: threading.Event) -> None:
+    """Continuous listener: parec -> OpenWakeWord -> record until silence."""
+    # OpenWakeWord lives in the alter-talk venv; make it importable from
+    # the system python the daemon runs under.
+    try:
+        for sp in (_WAKE_VENV / "lib").glob("python*/site-packages"):
+            sys.path.insert(0, str(sp))
+        import numpy as np
+        from openwakeword.model import Model
+    except Exception as exc:
+        _log(f"wakeword: openwakeword not available ({exc}) — listener off")
+        return
+    path = _wake_model_path(WAKEWORD_MODEL)
+    if not _ensure_wake_model(path, WAKEWORD_MODEL):
+        _log("wakeword: no model — listener off")
+        return
+    try:
+        oww = Model(wakeword_model_paths=[str(path)])
+        model_key = path.stem
+    except Exception as exc:
+        _log(f"wakeword: model load failed: {exc}")
+        return
+
+    cmd = ["parec", "--rate", "16000", "--channels", "1", "--format", "s16le"]
+    if RECORD_TARGET:
+        cmd += ["--device", RECORD_TARGET]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        _log(f"wakeword: parec failed: {exc}")
+        return
+    import atexit
+    atexit.register(proc.terminate)
+    _log(f"wakeword: listening ({WAKEWORD_MODEL}, sens {WAKEWORD_SENSITIVITY})")
+    _notify("alter-talk", f"Wake word on: {WAKEWORD_MODEL}")
+
+    last_trigger = 0.0
+    silence_since: float | None = None
+    try:
+        while not stop_event.is_set():
+            raw = proc.stdout.read(2560)  # 1280 samples = 80 ms
+            if not raw:
+                break
+            audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            now = time.monotonic()
+            rms = float(np.sqrt(np.mean(audio ** 2)))
+
+            # While a wake-triggered recording is running: stop on silence
+            # or the max-record cap.
+            if self.recording and self.wake_rec:
+                if rms < _WAKE_SILENCE_RMS:
+                    if silence_since is None:
+                        silence_since = now
+                    elif now - silence_since >= WAKEWORD_STOP_SILENCE:
+                        _log("wakeword: silence — finishing recording")
+                        self._finish_record()
+                        self.wake_rec = False
+                        silence_since = None
+                else:
+                    silence_since = None
+                if now - self.rec_t0 > WAKEWORD_MAX_RECORD:
+                    _log("wakeword: max record — finishing")
+                    self._finish_record()
+                    self.wake_rec = False
+                continue
+
+            if self.recording or now - last_trigger < WAKEWORD_COOLDOWN:
+                continue
+            score = float(oww.predict(audio).get(model_key, 0.0))
+            if score >= WAKEWORD_SENSITIVITY:
+                last_trigger = now
+                _log(f"wakeword: DETECTED ({score:.2f})")
+                _notify("alter-talk", "Wake word detected")
+                self.wake_rec = True
+                self.autosend = WAKEWORD_ACTION == "record_send"
+                self._start_record()
+                silence_since = None
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    _log("wakeword: listener stopped")
 
 
 # --------------------------------------------------------------------------
@@ -608,6 +737,7 @@ class _Daemon:
         self.autosend = False
         self.grace_deadline: float | None = None  # SL tap waiting for Pause
         self.pause_down = False
+        self.wake_rec = False  # recording started by the wake word listener
 
     def _start_record(self) -> None:
         if self.recording:
@@ -730,6 +860,11 @@ class _Daemon:
         import evdev
 
         _write_state(state="running", pid=os.getpid())
+        stop_event = threading.Event()
+        if WAKEWORD_ENABLED:
+            threading.Thread(
+                target=_wake_listen, args=(self, stop_event), daemon=True
+            ).start()
         devices = _watch_devices()
         if not devices:
             _notify("alter-talk", "Daemon: Pause/ScrollLock keys not found on evdev")
@@ -812,7 +947,7 @@ def _status_main() -> int:
           f"{'yes' if BOTH_SEND_ENTER else 'no'}"
           f" | grace {GRACE}s | max hold {MAX_HOLD}s | min rec {MIN_RECORDING}s")
     print(f"normalize: {'on' if NORMALIZE else 'off'}")
-    print(f"wakeword:  {'on (' + WAKEWORD_MODEL + ')' if WAKEWORD_ENABLED else 'off'}")
+    print(f"wakeword:  {'on (' + WAKEWORD_MODEL + ', ' + WAKEWORD_ACTION + ')' if WAKEWORD_ENABLED else 'off'}")
     if RECORD_TARGET:
         src = RECORD_TARGET
     else:
@@ -874,6 +1009,8 @@ _SETUP_FIELDS = [
     ("wakeword_cooldown",  "Wake word cooldown, seconds",        float),
     ("wakeword_max_record", "Wake word max record, seconds",     float),
     ("wakeword_stop_silence", "Wake word stop on silence, s",    float),
+    ("wakeword_action",    "Wake word action (record/record_send)", str),
+    ("wakeword_silence_level", "Wake word silence RMS level",    float),
 ]
 
 
@@ -898,6 +1035,8 @@ def _field_defaults() -> dict:
         "wakeword_cooldown": 2.0,
         "wakeword_max_record": 30.0,
         "wakeword_stop_silence": 1.5,
+        "wakeword_action": "record",
+        "wakeword_silence_level": 500.0,
     }
 
 
