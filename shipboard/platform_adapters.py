@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -355,23 +356,33 @@ def get_inject_backend() -> InjectBackend:
 # Clipboard
 # --------------------------------------------------------------------------
 
-def _linux_clip_cmd() -> list[str]:
-    env = os.environ
+def _linux_clip_cmd() -> tuple[list[str], dict]:
+    """Return (command, env) for the clipboard tool on Linux.
+
+    The daemon may run as a background process without a session env, so the
+    child env is patched to reach the Wayland socket: WAYLAND_DISPLAY is
+    picked from the live socket path when unset, and XDG_RUNTIME_DIR (which
+    libwayland uses to resolve the socket) is set from the user's runtime dir.
+    """
+    env = os.environ.copy()
+    runtime_dir = f"/run/user/{os.getuid()}"
     want_wayland = bool(env.get("WAYLAND_DISPLAY"))
     if not want_wayland:
         for cand in ("wayland-1", "wayland-0"):
-            if Path(f"/run/user/{os.getuid()}/{cand}").exists():
+            if Path(runtime_dir, cand).exists():
+                env["WAYLAND_DISPLAY"] = cand
                 want_wayland = True
                 break
     if want_wayland:
+        env.setdefault("XDG_RUNTIME_DIR", runtime_dir)
         wl = shutil.which("wl-copy")
         if wl:
-            return [wl]
+            return [wl], env
     if env.get("DISPLAY"):
         xclip = shutil.which("xclip")
         if xclip:
-            return [xclip, "-selection", "clipboard"]
-    return []
+            return [xclip, "-selection", "clipboard"], env
+    return [], env
 
 
 def copy_to_clipboard(text: str) -> None:
@@ -379,10 +390,17 @@ def copy_to_clipboard(text: str) -> None:
 
     Linux auto-detects Wayland (wl-copy) vs X11 (xclip); macOS uses pbcopy,
     Windows uses clip.exe. Raises RuntimeError if no backend is available.
+
+    wl-copy forks a background clipboard server by default, and that child
+    inherits the parent's stdout/stderr pipe FDs. Waiting on those pipes for
+    EOF therefore blocks until the server exits (clipboard ownership is
+    released) — the 10s hang. So stdout goes to /dev/null and stderr to a
+    regular file (kept only for the error message), never to a PIPE.
     """
     platform = detect_platform()
+    env = os.environ.copy()
     if platform == "linux":
-        cmd = _linux_clip_cmd()
+        cmd, env = _linux_clip_cmd()
         if not cmd:
             raise RuntimeError(
                 "clipboard copy needs wl-copy (Wayland) or xclip (X11) on Linux"
@@ -395,13 +413,15 @@ def copy_to_clipboard(text: str) -> None:
         raise NotImplementedError(
             f"clipboard copy is not implemented on {platform!r}"
         )
-    proc = subprocess.run(
-        cmd, input=text.encode("utf-8"), capture_output=True, timeout=10
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"{cmd[0]} failed: {proc.stderr.decode('utf-8', 'replace').strip()}"
+    with tempfile.TemporaryFile() as err:
+        proc = subprocess.run(
+            cmd, input=text.encode("utf-8"), env=env,
+            stdout=subprocess.DEVNULL, stderr=err, timeout=10,
         )
+        if proc.returncode != 0:
+            err.seek(0)
+            detail = err.read().decode("utf-8", "replace").strip()
+            raise RuntimeError(f"{cmd[0]} failed: {detail}")
 
 
 # --------------------------------------------------------------------------
