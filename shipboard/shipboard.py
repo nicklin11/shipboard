@@ -1561,6 +1561,8 @@ def _tui_main() -> int:
         if conv is bool:
             prompt = f" {label} [{_fmt_value(values[key])}]   space/y = yes · n = no · Esc = keep"
             try:
+                stdscr.move(h - 1, 0)
+                stdscr.clrtoeol()  # clear the navigation hint line first
                 stdscr.addnstr(h - 1, 0, prompt, w - 1)
                 stdscr.noutrefresh()
                 curses.doupdate()
@@ -1585,6 +1587,8 @@ def _tui_main() -> int:
             while True:
                 prompt = f" {label} [{buf}]"
                 try:
+                    stdscr.move(h - 1, 0)
+                    stdscr.clrtoeol()  # clear the navigation hint line first
                     stdscr.addnstr(h - 1, 0, prompt, w - 1)
                     stdscr.noutrefresh()
                     curses.doupdate()
