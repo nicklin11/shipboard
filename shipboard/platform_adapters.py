@@ -45,6 +45,45 @@ def detect_platform() -> str:
 
 
 # --------------------------------------------------------------------------
+# shipboard.toml backend overrides (lazy; default = auto-detect)
+# --------------------------------------------------------------------------
+
+_CONFIG_PATH = Path("~/.config/shipboard/shipboard.toml").expanduser()
+_cfg_cache: dict | None = None
+
+
+def _get_config() -> dict:
+    """Load shipboard.toml once, lazily; {} if missing or unreadable.
+
+    Reading happens at first adapter call, never at import time, so this
+    module still imports cleanly on any OS.
+    """
+    global _cfg_cache
+    if _cfg_cache is None:
+        try:
+            import tomllib
+
+            with open(_CONFIG_PATH, "rb") as fh:
+                _cfg_cache = tomllib.load(fh)
+        except (OSError, tomllib.TOMLDecodeError):
+            _cfg_cache = {}
+    return _cfg_cache
+
+
+def _backend_choice(name: str, allowed: tuple[str, ...]) -> str | None:
+    """Return the forced backend for ``name``, or None for auto-detect."""
+    value = str(_get_config().get(name, "auto")).strip().lower()
+    if value in ("", "auto"):
+        return None
+    if value not in allowed:
+        raise RuntimeError(
+            f"shipboard.toml: {name}={value!r} is not one of "
+            f"{', '.join(allowed)}"
+        )
+    return value
+
+
+# --------------------------------------------------------------------------
 # Input listening (Linux evdev)
 # --------------------------------------------------------------------------
 
@@ -162,7 +201,8 @@ def get_input_backend(key_codes):
     """Return an InputListener watching ``key_codes``.
 
     Raises RuntimeError if evdev is unavailable, NotImplementedError on any
-    non-Linux platform.
+    non-Linux platform. ``input_device_glob`` in shipboard.toml narrows the
+    scanned devices (empty/missing = /dev/input/event*).
     """
     if detect_platform() != "linux":
         return _InputUnavailable
@@ -172,7 +212,8 @@ def get_input_backend(key_codes):
         raise RuntimeError(
             "evdev is required for Linux key input (pip install python-evdev)"
         ) from exc
-    return InputListener(key_codes)
+    glob = str(_get_config().get("input_device_glob", "")).strip()
+    return InputListener(key_codes, devices=glob or "/dev/input/event*")
 
 
 # --------------------------------------------------------------------------
@@ -316,7 +357,42 @@ def get_inject_backend() -> InjectBackend:
     Linux: python-evdev uinput, falling back to wtype if uinput fails at call
     time. macOS/Windows: pynput, imported lazily. Raises RuntimeError if no
     backend is importable; raising on a missing native tool happens per call.
+
+    ``inject_backend`` in shipboard.toml (auto|uinput|wtype|pynput) forces a
+    specific backend; an unavailable forced backend raises a RuntimeError
+    instead of auto-falling back.
     """
+    forced = _backend_choice("inject_backend", ("uinput", "wtype", "pynput"))
+    if forced == "uinput":
+        if detect_platform() != "linux":
+            raise RuntimeError(
+                "shipboard.toml sets inject_backend='uinput' but uinput "
+                "injection is only available on Linux"
+            )
+        try:
+            import evdev  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "shipboard.toml sets inject_backend='uinput' but python-evdev "
+                "is not installed (pip install python-evdev)"
+            ) from exc
+        return InjectBackend("uinput", _inject_uinput)
+    if forced == "wtype":
+        if not shutil.which("wtype"):
+            raise RuntimeError(
+                "shipboard.toml sets inject_backend='wtype' but wtype is not "
+                "installed"
+            )
+        return InjectBackend("wtype", _inject_wtype)
+    if forced == "pynput":
+        try:
+            import pynput  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "shipboard.toml sets inject_backend='pynput' but pynput is "
+                "not installed (pip install pynput)"
+            ) from exc
+        return InjectBackend("pynput", _inject_pynput)
     platform = detect_platform()
     if platform == "linux":
         try:
@@ -356,6 +432,20 @@ def get_inject_backend() -> InjectBackend:
 # Clipboard
 # --------------------------------------------------------------------------
 
+def _linux_clip_env() -> dict:
+    """Child env with the Wayland socket/XDG_RUNTIME_DIR patched for wl-copy."""
+    env = os.environ.copy()
+    runtime_dir = f"/run/user/{os.getuid()}"
+    if not env.get("WAYLAND_DISPLAY"):
+        for cand in ("wayland-1", "wayland-0"):
+            if Path(runtime_dir, cand).exists():
+                env["WAYLAND_DISPLAY"] = cand
+                break
+    if env.get("WAYLAND_DISPLAY"):
+        env.setdefault("XDG_RUNTIME_DIR", runtime_dir)
+    return env
+
+
 def _linux_clip_cmd() -> tuple[list[str], dict]:
     """Return (command, env) for the clipboard tool on Linux.
 
@@ -364,17 +454,8 @@ def _linux_clip_cmd() -> tuple[list[str], dict]:
     picked from the live socket path when unset, and XDG_RUNTIME_DIR (which
     libwayland uses to resolve the socket) is set from the user's runtime dir.
     """
-    env = os.environ.copy()
-    runtime_dir = f"/run/user/{os.getuid()}"
-    want_wayland = bool(env.get("WAYLAND_DISPLAY"))
-    if not want_wayland:
-        for cand in ("wayland-1", "wayland-0"):
-            if Path(runtime_dir, cand).exists():
-                env["WAYLAND_DISPLAY"] = cand
-                want_wayland = True
-                break
-    if want_wayland:
-        env.setdefault("XDG_RUNTIME_DIR", runtime_dir)
+    env = _linux_clip_env()
+    if env.get("WAYLAND_DISPLAY"):
         wl = shutil.which("wl-copy")
         if wl:
             return [wl], env
@@ -385,11 +466,68 @@ def _linux_clip_cmd() -> tuple[list[str], dict]:
     return [], env
 
 
+def _forced_clip_cmd(backend: str, platform: str, env: dict) -> tuple[list[str], dict]:
+    """Return (command, env) for a forced clipboard backend; RuntimeError
+    when the tool is unavailable or belongs to another platform."""
+    if backend == "wl-copy":
+        if platform != "linux":
+            raise RuntimeError(
+                "shipboard.toml sets clipboard_backend='wl-copy' but the "
+                f"current platform is {platform!r}"
+            )
+        if not shutil.which("wl-copy"):
+            raise RuntimeError(
+                "shipboard.toml sets clipboard_backend='wl-copy' but wl-copy "
+                "is not installed"
+            )
+        return ["wl-copy"], _linux_clip_env()
+    if backend == "xclip":
+        if platform != "linux":
+            raise RuntimeError(
+                "shipboard.toml sets clipboard_backend='xclip' but the "
+                f"current platform is {platform!r}"
+            )
+        if not shutil.which("xclip"):
+            raise RuntimeError(
+                "shipboard.toml sets clipboard_backend='xclip' but xclip is "
+                "not installed"
+            )
+        return [shutil.which("xclip"), "-selection", "clipboard"], env
+    if backend == "pbcopy":
+        if platform != "macos":
+            raise RuntimeError(
+                "shipboard.toml sets clipboard_backend='pbcopy' but the "
+                f"current platform is {platform!r}"
+            )
+        if not shutil.which("pbcopy"):
+            raise RuntimeError(
+                "shipboard.toml sets clipboard_backend='pbcopy' but pbcopy "
+                "is not installed"
+            )
+        return [shutil.which("pbcopy")], env
+    if backend == "clip":
+        if platform != "windows":
+            raise RuntimeError(
+                "shipboard.toml sets clipboard_backend='clip' but the "
+                f"current platform is {platform!r}"
+            )
+        if not shutil.which("clip"):
+            raise RuntimeError(
+                "shipboard.toml sets clipboard_backend='clip' but clip.exe "
+                "is not available"
+            )
+        return [shutil.which("clip")], env
+    raise RuntimeError(f"unsupported clipboard backend: {backend!r}")
+
+
 def copy_to_clipboard(text: str) -> None:
     """Copy ``text`` to the clipboard via the platform's native tool.
 
     Linux auto-detects Wayland (wl-copy) vs X11 (xclip); macOS uses pbcopy,
     Windows uses clip.exe. Raises RuntimeError if no backend is available.
+    ``clipboard_backend`` in shipboard.toml
+    (auto|wl-copy|xclip|pbcopy|clip) forces a specific tool and raises a
+    RuntimeError when it is unavailable here.
 
     wl-copy forks a background clipboard server by default, and that child
     inherits the parent's stdout/stderr pipe FDs. Waiting on those pipes for
@@ -398,8 +536,13 @@ def copy_to_clipboard(text: str) -> None:
     regular file (kept only for the error message), never to a PIPE.
     """
     platform = detect_platform()
+    forced = _backend_choice(
+        "clipboard_backend", ("wl-copy", "xclip", "pbcopy", "clip")
+    )
     env = os.environ.copy()
-    if platform == "linux":
+    if forced is not None:
+        cmd, env = _forced_clip_cmd(forced, platform, env)
+    elif platform == "linux":
         cmd, env = _linux_clip_cmd()
         if not cmd:
             raise RuntimeError(
@@ -456,9 +599,31 @@ def start_recording(path, rate: int = 16000, channels: int = 1,
     Linux prefers pw-record (PipeWire); ffmpeg is the fallback everywhere.
     ``target`` is a PipeWire source name (pw-record ``--target``), ignored
     by ffmpeg. The caller stops recording with proc.send_signal(SIGINT) /
-    kill, mirroring shipboard's stop_recording().
+    kill, mirroring shipboard's stop_recording(). ``record_backend`` in
+    shipboard.toml (auto|pw-record|ffmpeg) forces a backend and raises a
+    RuntimeError when it is unavailable.
     """
-    if detect_platform() == "linux":
+    forced = _backend_choice("record_backend", ("pw-record", "ffmpeg"))
+    platform = detect_platform()
+    if forced == "pw-record":
+        pw = shutil.which("pw-record")
+        if platform != "linux":
+            raise RuntimeError(
+                "shipboard.toml sets record_backend='pw-record' but the "
+                f"current platform is {platform!r}"
+            )
+        if not pw:
+            raise RuntimeError(
+                "shipboard.toml sets record_backend='pw-record' but pw-record "
+                "is not installed"
+            )
+        cmd = [pw, "--rate", str(rate), "--channels", str(channels)]
+        if target:
+            cmd += ["--target", target]
+        cmd.append(str(path))
+    elif forced == "ffmpeg":
+        cmd = _ffmpeg_cmd(path, rate, channels)
+    elif platform == "linux":
         pw = shutil.which("pw-record")
         if pw:
             cmd = [pw, "--rate", str(rate), "--channels", str(channels)]
@@ -528,9 +693,53 @@ def notify(title: str, msg: str) -> None:
 
     Uses notify-send (Linux), osascript (macOS), or a PowerShell toast
     (Windows). A missing tool is silently skipped, matching shipboard's
-    existing fire-and-forget notification behavior.
+    existing fire-and-forget notification behavior. ``notify_backend`` in
+    shipboard.toml (auto|notify-send|osascript|powershell) forces a backend;
+    a forced but unavailable backend raises a RuntimeError.
     """
     platform = detect_platform()
+    forced = _backend_choice(
+        "notify_backend", ("notify-send", "osascript", "powershell")
+    )
+    if forced == "notify-send":
+        if platform != "linux":
+            raise RuntimeError(
+                "shipboard.toml sets notify_backend='notify-send' but the "
+                f"current platform is {platform!r}"
+            )
+        if not shutil.which("notify-send"):
+            raise RuntimeError(
+                "shipboard.toml sets notify_backend='notify-send' but "
+                "notify-send is not installed"
+            )
+        _notify_linux(title, msg)
+        return
+    if forced == "osascript":
+        if platform != "macos":
+            raise RuntimeError(
+                "shipboard.toml sets notify_backend='osascript' but the "
+                f"current platform is {platform!r}"
+            )
+        if not shutil.which("osascript"):
+            raise RuntimeError(
+                "shipboard.toml sets notify_backend='osascript' but osascript "
+                "is not installed"
+            )
+        _notify_macos(title, msg)
+        return
+    if forced == "powershell":
+        if platform != "windows":
+            raise RuntimeError(
+                "shipboard.toml sets notify_backend='powershell' but the "
+                f"current platform is {platform!r}"
+            )
+        if not shutil.which("powershell"):
+            raise RuntimeError(
+                "shipboard.toml sets notify_backend='powershell' but "
+                "powershell is not available"
+            )
+        _notify_windows(title, msg)
+        return
     try:
         if platform == "linux":
             _notify_linux(title, msg)

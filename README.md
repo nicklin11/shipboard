@@ -75,6 +75,20 @@ No compositor keybinds are needed for the keys themselves: the daemon reads
 Pause / Scroll Lock straight from evdev. You only need one compositor tweak —
 **swallow the keys** so they don't leak into apps (see Troubleshooting).
 
+## shipboard CLI
+
+The installed `shipboard` binary manages the daemon from the command line:
+
+| Command | What it does |
+|---|---|
+| `shipboard daemon` (alias: `start`) | run the daemon detached (reports if it's already running) |
+| `shipboard stop` | SIGTERM to all daemon processes |
+| `shipboard restart` | restart via systemd, else respawn detached |
+| `shipboard setup` | interactive TUI: configure + write keybinds |
+| `shipboard status` | print daemon / whisper state |
+| `shipboard config` | interactive TOML editor |
+| `shipboard --send` | one-shot paste clipboard + Enter |
+
 ## shipboard usage
 
 - Hold **Pause**, speak, release → transcript lands in the clipboard

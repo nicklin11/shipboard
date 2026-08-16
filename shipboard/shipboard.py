@@ -1173,7 +1173,11 @@ def _status_main() -> int:
         try:
             st = json.loads(STATE_PATH.read_text())
             when = time.strftime("%H:%M:%S", time.localtime(st.get("ts", 0)))
-            print(f"last:      {st.get('state', '?')} @ {when}")
+            last_state = st.get("state", "?")
+            note = ""
+            if last_state == "running" and not _daemon_running():
+                note = " (daemon stopped)"
+            print(f"last:      {last_state} @ {when}{note}")
             if st.get("text"):
                 print(f"           {st['text']}")
         except Exception:
@@ -1201,38 +1205,56 @@ def _config_main() -> int:
 # TUI setup (stdlib curses, no dependencies)
 # --------------------------------------------------------------------------
 _SETUP_FIELDS = [
-    ("whisper_url",        "STT server URL (wake/tailnet proxy)", str),
-    ("whisper_health_url", "Health URL",                          str),
-    ("whisper_container",  "Docker container to wake",           str),
-    ("whisper_language",   "Whisper language (auto/ru/en/...)",  str),
-    ("record_target",      "Record source (default=system)",    str),
-    ("record_rate",        "Recording sample rate",             int),
-    ("record_channels",    "Recording channels",                int),
-    ("paste_combo",        "Paste shortcut (uinput combo)",      str),
-    ("send_enter",         "Enter after paste (global default)", bool),
-    ("scroll_send_enter",  "Scroll Lock tap: Enter after paste", bool),
-    ("both_send_enter",    "Both keys: Enter after paste",       bool),
-    ("max_hold",           "Max hold, seconds (stuck guard)",    float),
-    ("min_recording",      "Min recording, seconds",             float),
-    ("grace",              "Both-keys window, seconds",          float),
-    ("key_record",         "Record key (evdev name, e.g. pause)", str),
-    ("key_send",           "Send key (evdev name, e.g. scrolllock)", str),
-    ("key_record_send",    "Record+send key (evdev name, optional)", str),
-    ("key_record_mode",    "Record key mode (hold/toggle)",       str),
-    ("normalize",          "Dictation symbols (слэш/дэш/...) ",  bool),
-    ("prompt",             "Initial whisper prompt (optional)",  str),
-    ("wakeword_enabled",   "Wake word listener (engine WIP)",    bool),
-    ("wakeword_cooldown",  "Wake word cooldown, seconds",        float),
-    ("wakeword_stop_silence", "Wake word stop on silence, s",    float),
-    ("wakeword_action",    "Wake word action (record/record_send)", str),
-    ("wakeword_silence_level", "Wake word silence RMS level",    float),
-    ("wakeword_sherpa_score", "Sherpa KWS score boost (sensitivity)", float),
-    ("wakeword_sherpa_threshold", "Sherpa KWS threshold (lower=easier)", float),
-    ("kws_threads",        "Sherpa KWS onnxruntime threads",     int),
-    ("wakeword_record",    "Wake word: record (copy only)",        str),
-    ("wakeword_send",      "Wake word: record+send (paste+Enter)", str),
-    ("wakeword_paste",     "Wake word: paste (clipboard)",         str),
-    ("wakeword_debug",     "Wake word mic level log",             bool),
+    # STT
+    ("whisper_url",        "STT server URL (wake/tailnet proxy)", str, "STT"),
+    ("whisper_health_url", "Health URL",                          str, "STT"),
+    ("whisper_container",  "Docker container to wake",           str, "STT"),
+    ("whisper_language",   "Whisper language (auto/ru/en/...)",  str, "STT"),
+    # Recording
+    ("record_target",      "Record source (default=system)",    str, "Recording"),
+    ("record_rate",        "Recording sample rate",             int, "Recording"),
+    ("record_channels",    "Recording channels",                int, "Recording"),
+    # Send
+    ("paste_combo",        "Paste shortcut (uinput combo)",      str, "Send"),
+    ("send_enter",         "Enter after paste (global default)", bool, "Send"),
+    ("scroll_send_enter",  "Scroll Lock tap: Enter after paste", bool, "Send"),
+    ("both_send_enter",    "Both keys: Enter after paste",       bool, "Send"),
+    # Recording
+    ("max_hold",           "Max hold, seconds (stuck guard)",    float, "Recording"),
+    ("min_recording",      "Min recording, seconds",             float, "Recording"),
+    # Send
+    ("grace",              "Both-keys window, seconds",          float, "Send"),
+    # Keys
+    ("key_record",         "Record key (evdev name, e.g. pause)", str, "Keys"),
+    ("key_send",           "Send key (evdev name, e.g. scrolllock)", str, "Keys"),
+    ("key_record_send",    "Record+send key (evdev name, optional)", str, "Keys"),
+    ("key_record_mode",    "Record key mode (hold/toggle)",       str, "Keys"),
+    # Send
+    ("normalize",          "Dictation symbols (слэш/дэш/...) ",  bool, "Send"),
+    # STT
+    ("prompt",             "Initial whisper prompt (optional)",  str, "STT"),
+    # Wake words
+    ("wakeword_enabled",   "Wake word listener (engine WIP)",    bool, "Wake words"),
+    ("wakeword_cooldown",  "Wake word cooldown, seconds",        float, "Wake words"),
+    ("wakeword_grace",     "Wake word grace, seconds",           float, "Wake words"),
+    ("wakeword_stop_silence", "Wake word stop on silence, s",    float, "Wake words"),
+    ("wakeword_action",    "Wake word action (record/record_send)", str, "Wake words"),
+    ("wakeword_silence_level", "Wake word silence RMS level",    float, "Wake words"),
+    ("wakeword_sherpa_score", "Sherpa KWS score boost (sensitivity)", float, "Wake words"),
+    ("wakeword_sherpa_threshold", "Sherpa KWS threshold (lower=easier)", float, "Wake words"),
+    ("kws_threads",        "Sherpa KWS onnxruntime threads",     int, "Wake words"),
+    ("wakeword_record",    "Wake word: record (copy only)",        str, "Wake words"),
+    ("wakeword_send",      "Wake word: record+send (paste+Enter)", str, "Wake words"),
+    ("wakeword_paste",     "Wake word: paste (clipboard)",         str, "Wake words"),
+    ("wakeword_debug",     "Wake word mic level log",             bool, "Wake words"),
+    # Platform
+    ("keep_audio_dir",     "Keep recordings in dir ('' = delete)", str, "Platform"),
+    ("dry_run",            "Dry run (log actions, do nothing)",    bool, "Platform"),
+    ("inject_backend",     "Key inject backend (auto/uinput/wtype)", str, "Platform"),
+    ("notify_backend",     "Notify backend (auto/notify-send/...)", str, "Platform"),
+    ("clipboard_backend",  "Clipboard backend (auto/wl-copy/xclip)", str, "Platform"),
+    ("record_backend",     "Record backend (auto/pw-record/ffmpeg)", str, "Platform"),
+    ("input_device_glob",  "Input device glob (evdev, e.g. event*)", str, "Platform"),
 ]
 
 
@@ -1260,6 +1282,7 @@ def _field_defaults() -> dict:
         "prompt": "",
         "wakeword_enabled": False,
         "wakeword_cooldown": 2.0,
+        "wakeword_grace": 3.0,
         "wakeword_stop_silence": 1.5,
         "wakeword_action": "record",
         "wakeword_silence_level": 500.0,
@@ -1270,6 +1293,13 @@ def _field_defaults() -> dict:
         "wakeword_send": "push it, ship it, send it, drop it",
         "wakeword_paste": "paste it, insert it, stick it",
         "wakeword_debug": False,
+        "keep_audio_dir": "",
+        "dry_run": False,
+        "inject_backend": "auto",
+        "notify_backend": "auto",
+        "clipboard_backend": "auto",
+        "record_backend": "auto",
+        "input_device_glob": "",
     }
 
 
@@ -1293,7 +1323,7 @@ def _save_config_file(values: dict) -> None:
         "# Precedence: defaults < this file < environment variables.",
         "",
     ]
-    for key, _label, conv in _SETUP_FIELDS:
+    for key, _label, conv, _section in _SETUP_FIELDS:
         v = values[key]
         if conv is str:
             lines.append(f'{key} = "{v}"')
@@ -1319,6 +1349,9 @@ def _health_check(url: str) -> str:
 
 def _daemon_pids() -> list[int]:
     # Match only the daemon python process (not bash wrappers / other CLIs).
+    # The daemon is always launched as `python <path>` with NO subcommand;
+    # `shipboard setup` / `status` / `--send` etc. carry extra argv entries
+    # and must never be killed by stop/restart.
     out = subprocess.run(["pgrep", "-f", "python3 .*shipboard"],
                          capture_output=True, text=True)
     pids = []
@@ -1329,6 +1362,13 @@ def _daemon_pids() -> list[int]:
             continue
         if pid == os.getpid():
             continue  # never kill our own CLI process
+        try:
+            argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+            argv = [a.decode(errors="replace") for a in argv if a]
+        except OSError:
+            continue  # process exited between pgrep and read
+        if len(argv) != 2:
+            continue  # has a subcommand/flag -> not the daemon
         pids.append(pid)
     return pids
 
@@ -1394,7 +1434,11 @@ def _setup_main() -> int:
         print("\n" + "─" * 60)
         print(f" shipboard setup — {DEFAULT_CONFIG_PATH}")
         print("─" * 60)
-        for i, (key, label, conv) in enumerate(_SETUP_FIELDS, start=1):
+        last_section = None
+        for i, (key, label, conv, section) in enumerate(_SETUP_FIELDS, start=1):
+            if section != last_section:
+                print(f"\n  == {section} ==")
+                last_section = section
             mark = "*" if key in _CFG else " "
             print(f" {i:2}) {mark} {label:<40} {_fmt_value(values[key])}")
         print("─" * 60)
@@ -1423,7 +1467,7 @@ def _setup_main() -> int:
         elif choice.isdigit():
             i = int(choice) - 1
             if 0 <= i < len(_SETUP_FIELDS):
-                key, label, conv = _SETUP_FIELDS[i]
+                key, label, conv, _section = _SETUP_FIELDS[i]
                 cur = _fmt_value(values[key])
                 if conv is bool:
                     ans = input(f" {label} [{cur}] (y/n, Enter=keep): ").strip().lower()
@@ -1451,6 +1495,200 @@ def _setup_main() -> int:
             message = f"unknown command: {choice}"
 
 
+def _tui_main() -> int:
+    """Full-screen curses editor for _SETUP_FIELDS (alternative to `setup`).
+
+    ↑/↓ navigate · Enter edit · Space/y/n toggle bools · s save ·
+    t test STT · p compositor binds · r restart daemon · q quit.
+    Falls back to `shipboard setup` when curses is unavailable.
+    """
+    try:
+        import curses
+    except ImportError:
+        print("curses unavailable, use: shipboard setup", file=sys.stderr)
+        return 1
+    if os.environ.get("TERM") == "dumb" or not sys.stdin.isatty():
+        print("curses unavailable, use: shipboard setup", file=sys.stderr)
+        return 1
+
+    values = _field_defaults()
+    values.update(_CFG)
+    _setup_prefill(values)
+
+    rows = []  # ("section", name) | ("field", _SETUP_FIELDS index)
+    for i, (key, label, conv, section) in enumerate(_SETUP_FIELDS):
+        if not rows or rows[-1] != ("section", section):
+            rows.append(("section", section))
+        rows.append(("field", i))
+
+    def _next_field(sel: int, step: int) -> int:
+        i = sel + step
+        while 0 <= i < len(rows) and rows[i][0] != "field":
+            i += step
+        return i if 0 <= i < len(rows) else sel
+
+    def _show_binds(stdscr) -> None:
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        for y, ln in enumerate(_COMPOSITOR_SNIPPETS.splitlines()):
+            if y >= h - 1:
+                break
+            try:
+                stdscr.addnstr(y, 0, ln, w - 1)
+            except curses.error:
+                pass
+        try:
+            stdscr.addnstr(h - 1, 0, " q / Esc to close ", w - 1, curses.A_REVERSE)
+        except curses.error:
+            pass
+        stdscr.noutrefresh()
+        curses.doupdate()
+        while True:
+            ch = stdscr.getch()
+            if ch in (ord("q"), ord("Q"), 27, curses.KEY_ESCAPE):
+                break
+
+    def _edit_field(stdscr, sel: int, message: str) -> str:
+        field = rows[sel][1]
+        key, label, conv, _section = _SETUP_FIELDS[field]
+        h, w = stdscr.getmaxyx()
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        if conv is bool:
+            prompt = f" {label} [{_fmt_value(values[key])}]   space/y = yes · n = no · Esc = keep"
+            try:
+                stdscr.addnstr(h - 1, 0, prompt, w - 1)
+                stdscr.noutrefresh()
+                curses.doupdate()
+            except curses.error:
+                pass
+            while True:
+                ch = stdscr.getch()
+                if ch in (27, curses.KEY_ESCAPE):
+                    break
+                if ch == ord(" "):
+                    values[key] = not values[key]
+                    break
+                if ch in (ord("y"), ord("Y")):
+                    values[key] = True
+                    break
+                if ch in (ord("n"), ord("N")):
+                    values[key] = False
+                    break
+            message = f"{key} = {_fmt_value(values[key])}"
+        else:
+            buf = _fmt_value(values[key])
+            while True:
+                prompt = f" {label} [{buf}]"
+                try:
+                    stdscr.addnstr(h - 1, 0, prompt, w - 1)
+                    stdscr.noutrefresh()
+                    curses.doupdate()
+                except curses.error:
+                    pass
+                ch = stdscr.getch()
+                if ch in (27, curses.KEY_ESCAPE):
+                    break
+                if ch in (10, 13, curses.KEY_ENTER):
+                    try:
+                        values[key] = _parse_value(buf, conv)
+                        message = f"{key} = {_fmt_value(values[key])}"
+                    except ValueError:
+                        message = "invalid value, not saved"
+                    break
+                if ch in (8, 127, curses.KEY_BACKSPACE):
+                    buf = buf[:-1]
+                elif 32 <= ch < 127:
+                    buf += chr(ch)
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        return message
+
+    def run(stdscr) -> int:
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        stdscr.keypad(True)
+        try:
+            curses.use_default_colors()
+        except curses.error:
+            pass
+        sel, scroll = 0, 0
+        message = "↑/↓ navigate · Enter edit · s save · t test STT · p binds · r restart · q quit"
+        while True:
+            stdscr.erase()
+            h, w = stdscr.getmaxyx()
+            positions = []
+            y = 1
+            for kind, payload in rows:
+                positions.append((kind, payload, y))
+                y += 1
+            sel_y = positions[sel][2]
+            if sel_y - scroll < 1:
+                scroll = sel_y - 1
+            elif sel_y - scroll > h - 3:
+                scroll = sel_y - (h - 3)
+            title = f" shipboard setup — {DEFAULT_CONFIG_PATH} "
+            try:
+                stdscr.addnstr(0, 0, title, w - 1, curses.A_REVERSE)
+            except curses.error:
+                pass
+            for kind, payload, py in positions:
+                yy = py - scroll
+                if yy < 1 or yy >= h - 1:
+                    continue
+                try:
+                    if kind == "section":
+                        stdscr.addnstr(yy, 0, f"  == {payload} ==", w - 1,
+                                       curses.A_BOLD)
+                    else:
+                        key, label, conv, _section = _SETUP_FIELDS[payload]
+                        mark = "*" if key in _CFG else " "
+                        attrs = curses.A_REVERSE if payload == sel else 0
+                        stdscr.addnstr(yy, 0,
+                                       f" {mark} {label:<46} {_fmt_value(values[key])}",
+                                       w - 1, attrs)
+                except curses.error:
+                    pass
+            try:
+                stdscr.addnstr(h - 1, 0, message, w - 1)
+            except curses.error:
+                pass
+            stdscr.noutrefresh()
+            curses.doupdate()
+            ch = stdscr.getch()
+            if ch in (curses.KEY_UP, ord("k")):
+                sel = _next_field(sel, -1)
+            elif ch in (curses.KEY_DOWN, ord("j")):
+                sel = _next_field(sel, 1)
+            elif ch in (curses.KEY_RESIZE,):
+                continue
+            elif ch in (10, 13, curses.KEY_ENTER):
+                message = _edit_field(stdscr, sel, message)
+            elif ch == ord("s"):
+                _save_config_file(values)
+                message = "saved to ~/.config/shipboard/shipboard.toml - restart daemon to apply (r)"
+            elif ch == ord("t"):
+                message = "STT health: " + _health_check(values["whisper_health_url"])
+            elif ch == ord("p"):
+                _show_binds(stdscr)
+            elif ch == ord("r"):
+                message = _restart_daemon()
+            elif ch in (ord("q"), ord("Q")):
+                return 0
+        return 0
+
+    try:
+        return curses.wrapper(run)
+    except KeyboardInterrupt:
+        return 0
+
+
 # --------------------------------------------------------------------------
 # Entry points
 # --------------------------------------------------------------------------
@@ -1471,6 +1709,41 @@ def _daemon_main() -> int:
             Path(DAEMON_LOCK_PATH).unlink(missing_ok=True)
         except OSError:
             pass
+    return 0
+
+
+def _start_daemon() -> int:
+    """Start the daemon detached; alias for the `daemon`/`start` subcommands."""
+    if _daemon_pids():
+        print("shipboard: daemon already running", file=sys.stderr)
+        return 0
+    subprocess.Popen(
+        [sys.executable, str(Path(sys.argv[0]).resolve())],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    print("shipboard: daemon started (detached)")
+    return 0
+
+
+def _stop_daemon() -> int:
+    """SIGTERM every daemon process (the `stop` subcommand)."""
+    pids = _daemon_pids()
+    if not pids:
+        print("shipboard: no daemon running", file=sys.stderr)
+        return 0
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    print(f"shipboard: stopped daemon ({len(pids)} process(es))")
+    return 0
+
+
+def _restart_main() -> int:
+    """Restart the daemon (the `restart` subcommand)."""
+    print(f"shipboard: {_restart_daemon()}")
     return 0
 
 
@@ -1499,12 +1772,23 @@ def main() -> int:
         return _config_main()
     if sys.argv[1:2] == ["setup"]:
         return _setup_main()
+    if sys.argv[1:2] in (["tui"], ["setup-tui"]):
+        return _tui_main()
+    if sys.argv[1:2] in (["daemon"], ["start"]):
+        return _start_daemon()
+    if sys.argv[1:2] == ["stop"]:
+        return _stop_daemon()
+    if sys.argv[1:2] == ["restart"]:
+        return _restart_main()
 
     parser = argparse.ArgumentParser(
         description=(
             "shipboard: voice daemon (Pause/Scroll Lock) + helpers.\n"
-            "Subcommands: status (state), config (TOML editor), "
-            "setup (interactive TUI), --send (paste+Enter)."
+            "CLI subcommands: daemon/start (run detached), stop (SIGTERM), "
+            "restart (systemd or respawn), status (state), "
+            "config (TOML editor), --send (paste+Enter).\n"
+            "Interactive: setup (numbered CLI dialog), "
+            "tui/setup-tui (full-screen curses setup)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

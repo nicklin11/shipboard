@@ -50,8 +50,18 @@ normalize = true
 #   phrase:action pairs — record (clipboard) | record_send (paste+Enter)
 # wakeword_sensitivity = 0.5      # openwakeword only, 0..1
 # wakeword_cooldown = 2.0         # seconds between triggers
+# wakeword_grace = 3.0            # keep recording through silence right after a trigger
 # wakeword_max_record = 30.0      # cap for recording after a trigger
 # wakeword_stop_silence = 1.5     # seconds of silence end the recording
 # wakeword_silence_level = 500    # RMS below this counts as silence
 # wakeword_model = "hey_jarvis"   # openwakeword only: name or .onnx path
 # kws_threads = 2                 # sherpa KWS: onnxruntime threads
+
+# Platform / backend overrides (auto = best for the running session)
+# keep_audio_dir = ""             # keep recordings here instead of deleting them
+# dry_run = false                 # log actions without performing them
+# inject_backend = "auto"         # auto | uinput | wtype | pynput
+# notify_backend = "auto"         # auto | notify-send | osascript | powershell
+# clipboard_backend = "auto"      # auto | wl-copy | xclip | pbcopy | clip
+# record_backend = "auto"         # auto | pw-record | ffmpeg
+# input_device_glob = ""          # evdev device glob, e.g. /dev/input/event*
