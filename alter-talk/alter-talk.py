@@ -72,7 +72,9 @@ min_recording = 0.5    # seconds; shorter recordings are discarded
 
 # Send mode (Scroll Lock / both keys)
 paste_combo = "ctrl+shift+v"   # injected as a modifier combo (layout-proof)
-send_enter = true              # also press Enter after pasting
+send_enter = true              # global default: also press Enter after pasting
+scroll_send_enter = true       # Scroll Lock tap: Enter after paste
+both_send_enter = true         # both keys held: Enter after paste
 
 # Both-keys detection window (seconds): Scroll Lock pressed this long before
 # Pause is still treated as "both held".
@@ -90,6 +92,15 @@ prompt = ""
 #   record_target = "default"
 #   record_target = "alsa_input.pci-0000_00_1f.3.analog-stereo"
 record_target = "default"
+
+# Wake word listener (OpenWakeWord engine — work in progress).
+# Schema is ready; engine lands next. Keys keep working regardless.
+wakeword_enabled = false
+wakeword_model = "hey_jarvis"     # pretrained name or path to a .onnx
+wakeword_sensitivity = 0.5        # 0..1 detection threshold
+wakeword_cooldown = 2.0           # seconds between triggers
+wakeword_max_record = 30.0        # cap for recording after a trigger
+wakeword_stop_silence = 1.5       # seconds of silence end the recording
 """
 
 
@@ -138,6 +149,24 @@ DAEMON_LOCK_PATH = Path(_cfg("daemon_lock_path", "ALTER_TALK_DAEMON_LOCK",
 PASTE_COMBO = _cfg("paste_combo", "ALTER_TALK_PASTE_COMBO",
                    "ctrl+shift+v", str.lower)
 SEND_ENTER = _cfg("send_enter", "ALTER_TALK_SEND_ENTER", True, _as_bool)
+# Per-trigger "Enter after paste" (fall back to the global send_enter)
+SCROLL_SEND_ENTER = _cfg("scroll_send_enter", "ALTER_TALK_SCROLL_SEND_ENTER",
+                         SEND_ENTER, _as_bool)
+BOTH_SEND_ENTER = _cfg("both_send_enter", "ALTER_TALK_BOTH_SEND_ENTER",
+                       SEND_ENTER, _as_bool)
+# Wake word listener (engine WIP — config schema is ready)
+WAKEWORD_ENABLED = _cfg("wakeword_enabled", "ALTER_TALK_WAKEWORD_ENABLED",
+                        False, _as_bool)
+WAKEWORD_MODEL = _cfg("wakeword_model", "ALTER_TALK_WAKEWORD_MODEL",
+                      "hey_jarvis")
+WAKEWORD_SENSITIVITY = _cfg("wakeword_sensitivity",
+                            "ALTER_TALK_WAKEWORD_SENSITIVITY", 0.5, float)
+WAKEWORD_COOLDOWN = _cfg("wakeword_cooldown", "ALTER_TALK_WAKEWORD_COOLDOWN",
+                         2.0, float)
+WAKEWORD_MAX_RECORD = _cfg("wakeword_max_record",
+                           "ALTER_TALK_WAKEWORD_MAX_RECORD", 30.0, float)
+WAKEWORD_STOP_SILENCE = _cfg("wakeword_stop_silence",
+                             "ALTER_TALK_WAKEWORD_STOP_SILENCE", 1.5, float)
 DRY_RUN = _cfg("dry_run", "ALTER_TALK_DRY_RUN", False, _as_bool)
 NORMALIZE = _cfg("normalize", "ALTER_TALK_NORMALIZE", True, _as_bool)
 PROMPT = _cfg("prompt", "ALTER_TALK_PROMPT", "")
@@ -556,7 +585,7 @@ def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
 
         if autosend:
             try:
-                send_keys()
+                send_keys(enter=BOTH_SEND_ENTER)
             except Exception as exc:
                 _notify("alter-talk", f"Copied, but not sent: {exc}")
                 return 1
@@ -650,7 +679,7 @@ class _Daemon:
             _log(f"result: {preview!r}")
             if autosend:
                 try:
-                    send_keys()
+                    send_keys(enter=BOTH_SEND_ENTER)
                 except Exception as exc:
                     _write_state(state="error", text=str(exc)[:200])
                     _notify("alter-talk", f"Copied, but not sent: {exc}")
@@ -710,7 +739,7 @@ class _Daemon:
             if self.grace_deadline is not None and now >= self.grace_deadline:
                 self.grace_deadline = None
                 try:
-                    send_keys()
+                    send_keys(enter=SCROLL_SEND_ENTER)
                 except Exception as exc:
                     _notify("alter-talk", f"Failed to send: {exc}")
             # MAX_HOLD safety: force-finish a stuck recording.
@@ -778,10 +807,12 @@ def _status_main() -> int:
     print(f"stt:       {WHISPER_URL}")
     print("keys:      Pause = record->clipboard | Scroll Lock = paste+Enter |"
           " both = record->paste+Enter")
-    print(f"paste:     {PASTE_COMBO}{' + Enter' if SEND_ENTER else ''}"
-          f" | grace {GRACE}s | max hold {MAX_HOLD}s"
-          f" | min rec {MIN_RECORDING}s")
+    print(f"paste:     {PASTE_COMBO} | Scroll Lock Enter: "
+          f"{'yes' if SCROLL_SEND_ENTER else 'no'} | both Enter: "
+          f"{'yes' if BOTH_SEND_ENTER else 'no'}"
+          f" | grace {GRACE}s | max hold {MAX_HOLD}s | min rec {MIN_RECORDING}s")
     print(f"normalize: {'on' if NORMALIZE else 'off'}")
+    print(f"wakeword:  {'on (' + WAKEWORD_MODEL + ')' if WAKEWORD_ENABLED else 'off'}")
     if RECORD_TARGET:
         src = RECORD_TARGET
     else:
@@ -829,12 +860,20 @@ _SETUP_FIELDS = [
     ("whisper_container",  "Docker container to wake",           str),
     ("record_target",      "Record source (default=system)",    str),
     ("paste_combo",        "Paste shortcut (uinput combo)",      str),
-    ("send_enter",         "Press Enter after paste",            bool),
+    ("send_enter",         "Enter after paste (global default)", bool),
+    ("scroll_send_enter",  "Scroll Lock tap: Enter after paste", bool),
+    ("both_send_enter",    "Both keys: Enter after paste",       bool),
     ("max_hold",           "Max hold, seconds (stuck guard)",    float),
     ("min_recording",      "Min recording, seconds",             float),
     ("grace",              "Both-keys window, seconds",          float),
     ("normalize",          "Dictation symbols (слэш/дэш/...) ",  bool),
     ("prompt",             "Initial whisper prompt (optional)",  str),
+    ("wakeword_enabled",   "Wake word listener (engine WIP)",    bool),
+    ("wakeword_model",     "Wake word model (pretrained)",       str),
+    ("wakeword_sensitivity", "Wake word sensitivity (0..1)",     float),
+    ("wakeword_cooldown",  "Wake word cooldown, seconds",        float),
+    ("wakeword_max_record", "Wake word max record, seconds",     float),
+    ("wakeword_stop_silence", "Wake word stop on silence, s",    float),
 ]
 
 
@@ -846,11 +885,19 @@ def _field_defaults() -> dict:
         "record_target": "default",
         "paste_combo": "ctrl+shift+v",
         "send_enter": True,
+        "scroll_send_enter": True,
+        "both_send_enter": True,
         "max_hold": 60.0,
         "min_recording": 0.5,
         "grace": 0.15,
         "normalize": True,
         "prompt": "",
+        "wakeword_enabled": False,
+        "wakeword_model": "hey_jarvis",
+        "wakeword_sensitivity": 0.5,
+        "wakeword_cooldown": 2.0,
+        "wakeword_max_record": 30.0,
+        "wakeword_stop_silence": 1.5,
     }
 
 
@@ -1049,7 +1096,7 @@ def _send_main() -> int:
         _notify("alter-talk", "Recording in progress — skipping paste")
         return 0
     try:
-        send_keys()
+        send_keys(enter=SCROLL_SEND_ENTER)
     except Exception as exc:
         _notify("alter-talk", f"Failed to send: {exc}")
         return 1
