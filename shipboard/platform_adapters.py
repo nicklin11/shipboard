@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # --------------------------------------------------------------------------
@@ -184,7 +185,30 @@ _COMBO_MODS = {
     "super": "KEY_LEFTMETA",
     "meta": "KEY_LEFTMETA",
 }
-_COMBO_KEYS = {"v": "KEY_V", "insert": "KEY_INSERT", "enter": "KEY_ENTER"}
+_COMBO_KEYS: dict[str, str] = {
+    "v": "KEY_V", "insert": "KEY_INSERT", "enter": "KEY_ENTER",
+}
+
+
+def _full_combo_keys() -> dict[str, str]:
+    """Letters a-z, digits 0-9, f1-f24 and common keys (lazy, needs evdev)."""
+    if len(_COMBO_KEYS) > 4:
+        return _COMBO_KEYS
+    from evdev import ecodes as e
+
+    for i in range(26):
+        ch = chr(ord("a") + i)
+        _COMBO_KEYS[ch] = f"KEY_{chr(ord('A') + i)}"
+    for d in range(10):
+        _COMBO_KEYS[str(d)] = f"KEY_{d}"
+    for f in range(1, 25):
+        _COMBO_KEYS[f"f{f}"] = f"KEY_F{f}"
+    _COMBO_KEYS.update({
+        "space": "KEY_SPACE", "tab": "KEY_TAB", "home": "KEY_HOME",
+        "end": "KEY_END", "pageup": "KEY_PAGEUP", "pagedown": "KEY_PAGEDOWN",
+        "delete": "KEY_DELETE", "backspace": "KEY_BACKSPACE",
+    })
+    return _COMBO_KEYS
 
 _PYNPUT_MODS = {
     "ctrl": "ctrl",
@@ -215,7 +239,8 @@ def _inject_uinput(combo: str, enter: bool) -> None:
     from evdev import UInput, ecodes
 
     parts = combo.split("+")
-    if len(parts) < 2 or parts[-1] not in _COMBO_KEYS:
+    keys = _full_combo_keys()
+    if len(parts) < 2 or parts[-1] not in keys:
         raise ValueError(f"unsupported combo: {combo!r}")
     codes = []
     for mod in parts[:-1]:
@@ -223,16 +248,20 @@ def _inject_uinput(combo: str, enter: bool) -> None:
         if name is None:
             raise ValueError(f"unknown modifier in combo: {mod!r}")
         codes.append(ecodes.ecodes[name])
-    codes.append(ecodes.ecodes[_COMBO_KEYS[parts[-1]]])
+    codes.append(ecodes.ecodes[keys[parts[-1]]])
     if enter:
         codes.append(ecodes.ecodes["KEY_ENTER"])
 
     with UInput() as ui:
+        delay = 0.03
         for code in codes:
             ui.write(ecodes.EV_KEY, code, 1)
+            ui.sync()
+        time.sleep(delay)
         for code in reversed(codes):
             ui.write(ecodes.EV_KEY, code, 0)
-        ui.sync()
+            ui.sync()
+        time.sleep(delay)
 
 
 def _inject_wtype(combo: str, enter: bool) -> None:
@@ -240,7 +269,8 @@ def _inject_wtype(combo: str, enter: bool) -> None:
     if not wtype:
         raise RuntimeError("wtype is not installed (and uinput injection failed)")
     parts = combo.split("+")
-    if len(parts) < 2 or parts[-1] not in _COMBO_KEYS:
+    keys = _full_combo_keys()
+    if len(parts) < 2 or parts[-1] not in keys:
         raise ValueError(f"unsupported combo: {combo!r}")
     cmd = [wtype]
     for mod in parts[:-1]:
@@ -257,7 +287,8 @@ def _inject_pynput(combo: str, enter: bool) -> None:
     from pynput import keyboard as _kb
 
     parts = combo.split("+")
-    if len(parts) < 2 or parts[-1] not in _PYNPUT_KEYS:
+    keys = _PYNPUT_KEYS | {chr(ord("a") + i): chr(ord("a") + i) for i in range(26)}
+    if len(parts) < 2 or parts[-1] not in keys:
         raise ValueError(f"unsupported combo: {combo!r}")
     ctl = _kb.Controller()
     mods = []
@@ -266,7 +297,7 @@ def _inject_pynput(combo: str, enter: bool) -> None:
         if name is None:
             raise ValueError(f"unknown modifier in combo: {mod!r}")
         mods.append(getattr(_kb.Key, name))
-    key = _PYNPUT_KEYS[parts[-1]]
+    key = keys[parts[-1]]
     for m in mods:
         ctl.press(m)
     ctl.press(key)
@@ -398,17 +429,22 @@ def _ffmpeg_cmd(path, rate, channels) -> list[str]:
     ]
 
 
-def start_recording(path, rate: int = 16000, channels: int = 1) -> subprocess.Popen:
+def start_recording(path, rate: int = 16000, channels: int = 1,
+                    target: str | None = None) -> subprocess.Popen:
     """Start recording to ``path``; returns the subprocess.Popen handle.
 
     Linux prefers pw-record (PipeWire); ffmpeg is the fallback everywhere.
-    The caller stops recording with proc.send_signal(SIGINT) / kill, mirroring
-    shipboard's stop_recording().
+    ``target`` is a PipeWire source name (pw-record ``--target``), ignored
+    by ffmpeg. The caller stops recording with proc.send_signal(SIGINT) /
+    kill, mirroring shipboard's stop_recording().
     """
     if detect_platform() == "linux":
         pw = shutil.which("pw-record")
         if pw:
-            cmd = [pw, "--rate", str(rate), "--channels", str(channels), str(path)]
+            cmd = [pw, "--rate", str(rate), "--channels", str(channels)]
+            if target:
+                cmd += ["--target", target]
+            cmd.append(str(path))
         else:
             cmd = _ffmpeg_cmd(path, rate, channels)
     else:

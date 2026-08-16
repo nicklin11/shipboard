@@ -41,13 +41,12 @@ from pathlib import Path
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import platform_adapters as _plat  # noqa: E402  (same-dir module)
+
 # --------------------------------------------------------------------------
 # Configuration: defaults < TOML config file < environment variables
 # --------------------------------------------------------------------------
-KEY_V = 47            # KEY_V
-KEY_INSERT = 110      # KEY_INSERT
-KEY_ENTER = 28        # KEY_ENTER
-
 DEFAULT_CONFIG_PATH = Path(
     "~/.config/shipboard/shipboard.toml"
 ).expanduser()
@@ -285,57 +284,9 @@ RECORD_TARGET = _cfg("record_target", "SHIPBOARD_RECORD_TARGET", "")
 if RECORD_TARGET.lower() in ("default", "auto", "system"):
     RECORD_TARGET = ""
 
-_MODIFIER_KEYS = ("ctrl", "shift", "alt", "super")
-
-_COMBO_KEYS: dict[str, int] = {}
-
-
-def _combo_keys() -> dict[str, int]:
-    """Key table for uinput injection: letters a-z, digits 0-9, f1-f24,
-    common editing keys + ctrl/shift/alt/super. Built from evdev ecodes on
-    first use (kept lazy so CLI-only subcommands never need evdev)."""
-    if not _COMBO_KEYS:
-        import evdev
-
-        e = evdev.ecodes
-        keys = {
-            "ctrl": e.KEY_LEFTCTRL,
-            "shift": e.KEY_LEFTSHIFT,
-            "alt": e.KEY_LEFTALT,
-            "super": e.KEY_LEFTMETA,
-            "v": e.KEY_V,
-            "insert": e.KEY_INSERT,
-            "enter": e.KEY_ENTER,
-        }
-        for i in range(26):
-            keys[chr(ord("a") + i)] = getattr(e, f"KEY_{chr(ord('A') + i)}")
-        for d in range(10):
-            keys[str(d)] = getattr(e, f"KEY_{d}")
-        for f in range(1, 25):
-            keys[f"f{f}"] = getattr(e, f"KEY_F{f}")
-        keys.update({
-            "space": e.KEY_SPACE,
-            "tab": e.KEY_TAB,
-            "home": e.KEY_HOME,
-            "end": e.KEY_END,
-            "pageup": e.KEY_PAGEUP,
-            "pagedown": e.KEY_PAGEDOWN,
-            "delete": e.KEY_DELETE,
-            "backspace": e.KEY_BACKSPACE,
-        })
-        _COMBO_KEYS.update(keys)
-    return _COMBO_KEYS
-
 
 def _notify(title: str, msg: str) -> None:
-    try:
-        subprocess.run(
-            ["notify-send", "-a", "shipboard", title, msg],
-            timeout=5,
-            capture_output=True,
-        )
-    except Exception:
-        pass
+    _plat.notify(title, msg)
 
 
 # --------------------------------------------------------------------------
@@ -349,14 +300,9 @@ def _log(msg: str) -> None:
 
 
 def start_recording(path: Path) -> subprocess.Popen:
-    cmd = ["pw-record", "--rate", str(RATE), "--channels", str(CHANNELS)]
-    if RECORD_TARGET:
-        cmd += ["--target", RECORD_TARGET]
-    cmd.append(str(path))
-    return subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    return _plat.start_recording(
+        path, rate=RATE, channels=CHANNELS,
+        target=RECORD_TARGET or None,
     )
 
 
@@ -805,98 +751,20 @@ def normalize_text(text: str) -> str:
 # Clipboard
 # --------------------------------------------------------------------------
 def copy_to_clipboard(text: str) -> None:
-    env = os.environ.copy()
-    if not env.get("WAYLAND_DISPLAY"):
-        for cand in ("wayland-1", "wayland-0"):
-            sock = Path(f"/run/user/{os.getuid()}/{cand}")
-            if sock.exists():
-                env["WAYLAND_DISPLAY"] = cand
-                break
-    proc = subprocess.run(
-        ["wl-copy"], input=text.encode("utf-8"), env=env, timeout=10
-    )
-    if proc.returncode != 0:
-        raise RuntimeError("wl-copy failed (Wayland session up?)")
+    _plat.copy_to_clipboard(text)
 
 
 # --------------------------------------------------------------------------
-# Key injection (uinput; wtype fallback)
+# Key injection (platform adapter: uinput -> wtype, pynput elsewhere)
 # --------------------------------------------------------------------------
-def _inject_via_wtype(combo: str, enter: bool) -> bool:
-    wtype = shutil.which("wtype")
-    if not wtype:
-        return False
-    parts = combo.split("+")
-    if not parts or parts[-1] in _MODIFIER_KEYS:
-        return False
-    cmd = [wtype]
-    for mod in parts[:-1]:
-        cmd += ["-M", mod]
-    cmd.append(parts[-1])
-    if enter:
-        cmd += ["-m", parts[-1], "Return"]
-    try:
-        subprocess.run(cmd, timeout=5, capture_output=True)
-        return True
-    except Exception:
-        return False
-
-
-def _inject_uinput(combo: str, enter: bool) -> None:
-    from evdev import UInput, ecodes
-
-    parts = combo.split("+")
-    if len(parts) < 2 or parts[-1] in _MODIFIER_KEYS:
-        raise ValueError(f"unsupported combo: {combo!r}")
-    keys_map = _combo_keys()
-    mods = []
-    for part in parts[:-1]:
-        if part not in _MODIFIER_KEYS:
-            raise ValueError(f"unknown modifier in combo: {part!r}")
-        mods.append(keys_map[part])
-    key = keys_map.get(parts[-1])
-    if key is None:
-        raise ValueError(f"unknown key in combo: {parts[-1]!r}")
-
-    keys = set(mods) | {key} | ({KEY_ENTER} if enter else set())
-    ui = UInput(
-        {ecodes.EV_KEY: list(keys)},
-        name="shipboard",
-        phys="shipboard",
-    )
-    try:
-        delay = 0.03
-        for mod in mods:
-            ui.write(ecodes.EV_KEY, mod, 1)
-            ui.syn()
-        ui.write(ecodes.EV_KEY, key, 1)
-        ui.syn()
-        time.sleep(delay)
-        ui.write(ecodes.EV_KEY, key, 0)
-        ui.syn()
-        for mod in reversed(mods):
-            ui.write(ecodes.EV_KEY, mod, 0)
-            ui.syn()
-        time.sleep(delay)
-        if enter:
-            ui.write(ecodes.EV_KEY, KEY_ENTER, 1)
-            ui.syn()
-            time.sleep(delay)
-            ui.write(ecodes.EV_KEY, KEY_ENTER, 0)
-            ui.syn()
-    finally:
-        ui.close()
-
-
 def send_keys(combo: str = PASTE_COMBO, enter: bool = SEND_ENTER) -> None:
     if DRY_RUN:
         print(f"[dry-run] send combo={combo!r} enter={enter}")
         return
     try:
-        _inject_uinput(combo, enter)
-    except Exception:
-        if not _inject_via_wtype(combo, enter):
-            raise RuntimeError("failed to inject keys (uinput unavailable, no wtype)")
+        _plat.get_inject_backend()(combo, enter)
+    except Exception as exc:
+        raise RuntimeError(f"failed to inject keys: {exc}") from exc
 
 
 # --------------------------------------------------------------------------
