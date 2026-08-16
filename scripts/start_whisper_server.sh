@@ -32,6 +32,11 @@ if [[ "${vad_enabled,,}" == "true" || "${vad_enabled}" == "1" || "${vad_enabled,
     )
 fi
 
+suppress_nst_args=()
+if [[ "${WHISPER_SUPPRESS_NST:-false}" == "true" ]]; then
+    suppress_nst_args+=(--suppress-nst)
+fi
+
 exec whisper-server \
     --model "${model_path}" \
     --host "${WHISPER_HOST:-0.0.0.0}" \
@@ -40,5 +45,5 @@ exec whisper-server \
     --threads "${WHISPER_THREADS:-6}" \
     --beam-size "${WHISPER_BEAM:-5}" \
     --best-of "${WHISPER_BEST_OF:-5}" \
-    --suppress-nst \
+    "${suppress_nst_args[@]}" \
     "${vad_args[@]}"

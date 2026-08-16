@@ -25,3 +25,8 @@ normalize = true
 
 # Optional initial prompt sent to whisper (domain vocabulary).
 # prompt = "Короткие команды на русском и английском, термины: Docker, config"
+
+# Record source for pw-record. "default" (or empty) = system default source
+# (e.g. the EasyEffects chain); a device name pins recording to it.
+# record_target = "default"
+# record_target = "alsa_input.pci-0000_00_1f.3.analog-stereo"

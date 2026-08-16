@@ -84,6 +84,12 @@ normalize = true
 # Optional initial prompt sent to whisper (helps with domain vocabulary,
 # e.g. "Короткие команды на русском и английском, термины: Docker, config").
 prompt = ""
+
+# Recording source for pw-record. "default" (or empty) = the system default
+# source (EasyEffects chain etc.); a device name pins recording to it, e.g.:
+#   record_target = "default"
+#   record_target = "alsa_input.pci-0000_00_1f.3.analog-stereo"
+record_target = "default"
 """
 
 
@@ -135,6 +141,14 @@ SEND_ENTER = _cfg("send_enter", "ALTER_TALK_SEND_ENTER", True, _as_bool)
 DRY_RUN = _cfg("dry_run", "ALTER_TALK_DRY_RUN", False, _as_bool)
 NORMALIZE = _cfg("normalize", "ALTER_TALK_NORMALIZE", True, _as_bool)
 PROMPT = _cfg("prompt", "ALTER_TALK_PROMPT", "")
+KEEP_AUDIO_DIR = Path(_cfg(
+    "keep_audio_dir", "ALTER_TALK_KEEP_AUDIO_DIR", ""
+)).expanduser() if _cfg("keep_audio_dir", "ALTER_TALK_KEEP_AUDIO_DIR", "") else None
+# "default"/"auto"/"" = record from the system default source (PipeWire
+# picks it, e.g. the EasyEffects chain); any other value = explicit device.
+RECORD_TARGET = _cfg("record_target", "ALTER_TALK_RECORD_TARGET", "")
+if RECORD_TARGET.lower() in ("default", "auto", "system"):
+    RECORD_TARGET = ""
 
 _COMBO_KEYS = {
     "ctrl": 29,        # KEY_LEFTCTRL
@@ -161,14 +175,20 @@ def _notify(title: str, msg: str) -> None:
 # --------------------------------------------------------------------------
 # Recording (PipeWire)
 # --------------------------------------------------------------------------
+def _log(msg: str) -> None:
+    try:
+        print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    except Exception:
+        pass
+
+
 def start_recording(path: Path) -> subprocess.Popen:
+    cmd = ["pw-record", "--rate", str(RATE), "--channels", str(CHANNELS)]
+    if RECORD_TARGET:
+        cmd += ["--target", RECORD_TARGET]
+    cmd.append(str(path))
     return subprocess.Popen(
-        [
-            "pw-record",
-            "--rate", str(RATE),
-            "--channels", str(CHANNELS),
-            str(path),
-        ],
+        cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -299,7 +319,7 @@ _SYMBOL_MAP = {
     "тире": "-", "tire": "-", "tireh": "-",
     "слэж": "/",
     # English
-    "slash": "/", "dot": ".", "tilde": "~", "dash": "-", "hyphen": "-",
+    "slash": "/", "dot": ".", "tilde": "~", "tilda": "~", "dash": "-", "hyphen": "-",
     "comma": ",", "colon": ":", "semicolon": ";", "equals": "=",
     "equal": "=", "ampersand": "&", "percent": "%", "at": "@",
     "underscore": "_", "asterisk": "*", "star": "*", "hash": "#",
@@ -328,13 +348,16 @@ def normalize_text(text: str) -> str:
     # whisper returns segments joined with newlines (VAD cuts the speech);
     # the result must be a single line
     text = re.sub(r"\s+", " ", text)
+    # whisper sometimes splits a spoken word ("сл эш" for "слэш") —
+    # stitch the known splits back together
+    text = text.replace("сл эш", "слэш")
     text = _TOKEN_RE.sub(lambda m: _SYMBOL_MAP[m.group(1).lower()], text)
     text = _GLUE_DASH_RE.sub("-", text)
     # the model often writes hyphens around the spoken word; collapse the
     # resulting runs of 3+ (keep "--" — legitimate flag prefix)
     text = re.sub(r"-{3,}", "--", text)
     # command symbols (paths, flags, URLs): never surrounded by spaces
-    text = re.sub(r"\s*([~/_\-\@#*=\+:])\s*", r"\1", text)
+    text = re.sub(r"\s*([~/_\-@#*+=:])\s*", r"\1", text)
     # dot: glued before a lowercase letter/digit ("файл.пи", "~/.config"),
     # sentence spacing otherwise ("Привет. Это")
     text = re.sub(r"\.\s+(?=[a-zа-яё0-9])", ".", text)
@@ -578,6 +601,7 @@ class _Daemon:
         self.rec_t0 = time.monotonic()
         self._tmp_dir = tmp_dir
         _write_state(state="recording")
+        _log(f"record start -> {wav}")
         _notify("alter-talk", "Recording... (hold Pause)")
 
     def _finish_record(self) -> None:
@@ -598,27 +622,37 @@ class _Daemon:
             if not wav.is_file() or wav.stat().st_size == 0:
                 _notify("alter-talk", "Error: empty recording file")
                 return
+            if KEEP_AUDIO_DIR is not None:
+                KEEP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+                shutil.copy(wav, KEEP_AUDIO_DIR / f"rec-{int(time.time())}.wav")
             _notify("alter-talk", "Processing speech...")
             _write_state(state="processing")
             try:
                 text = transcribe(wav)
+                _log(f"stt ok ({len(text)} chars)")
             except Exception as exc:
+                _log(f"stt error: {exc}")
+                _write_state(state="error", text=str(exc)[:200])
                 _notify("alter-talk", f"Recognition error: {exc}")
                 return
             text = normalize_text(text)
             if not text:
+                _write_state(state="idle")
                 _notify("alter-talk", "Nothing recognized")
                 return
             try:
                 copy_to_clipboard(text)
             except Exception as exc:
+                _write_state(state="error", text=str(exc)[:200])
                 _notify("alter-talk", f"Failed to copy: {exc}")
                 return
             preview = text if len(text) <= 100 else text[:100] + "…"
+            _log(f"result: {preview!r}")
             if autosend:
                 try:
                     send_keys()
                 except Exception as exc:
+                    _write_state(state="error", text=str(exc)[:200])
                     _notify("alter-talk", f"Copied, but not sent: {exc}")
                     return
                 _write_state(state="sent", text=preview)
@@ -748,6 +782,16 @@ def _status_main() -> int:
           f" | grace {GRACE}s | max hold {MAX_HOLD}s"
           f" | min rec {MIN_RECORDING}s")
     print(f"normalize: {'on' if NORMALIZE else 'off'}")
+    if RECORD_TARGET:
+        src = RECORD_TARGET
+    else:
+        try:
+            out = subprocess.run(["pactl", "get-default-source"],
+                                 capture_output=True, text=True, timeout=3)
+            src = f"default ({out.stdout.strip()})"
+        except Exception:
+            src = "default (system)"
+    print(f"source:    {src}")
     if STATE_PATH.is_file():
         try:
             st = json.loads(STATE_PATH.read_text())
@@ -783,6 +827,7 @@ _SETUP_FIELDS = [
     ("whisper_url",        "STT server URL (wake/tailnet proxy)", str),
     ("whisper_health_url", "Health URL",                          str),
     ("whisper_container",  "Docker container to wake",           str),
+    ("record_target",      "Record source (default=system)",    str),
     ("paste_combo",        "Paste shortcut (uinput combo)",      str),
     ("send_enter",         "Press Enter after paste",            bool),
     ("max_hold",           "Max hold, seconds (stuck guard)",    float),
@@ -798,6 +843,7 @@ def _field_defaults() -> dict:
         "whisper_url": "http://127.0.0.1:10300/inference",
         "whisper_health_url": "http://127.0.0.1:10300/health",
         "whisper_container": "whisper-local",
+        "record_target": "default",
         "paste_combo": "ctrl+shift+v",
         "send_enter": True,
         "max_hold": 60.0,
