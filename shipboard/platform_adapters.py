@@ -257,11 +257,11 @@ def _inject_uinput(combo: str, enter: bool) -> None:
         delay = 0.03
         for code in codes:
             ui.write(ecodes.EV_KEY, code, 1)
-            ui.sync()
+            ui.syn()
         time.sleep(delay)
         for code in reversed(codes):
             ui.write(ecodes.EV_KEY, code, 0)
-            ui.sync()
+            ui.syn()
         time.sleep(delay)
 
 
