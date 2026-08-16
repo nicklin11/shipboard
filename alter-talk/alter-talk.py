@@ -104,6 +104,8 @@ wakeword_max_record = 30.0        # cap for recording after a trigger
 wakeword_stop_silence = 1.5       # seconds of silence end the recording
 wakeword_action = "record"        # record (clipboard) | record_send (paste+Enter)
 wakeword_silence_level = 500      # RMS below this counts as silence (0..32768)
+wakeword_engine = "sherpa"        # sherpa (open-vocab phrases) | openwakeword
+wakeword_keywords = "alter capture:record, alter send:record_send"
 """
 
 
@@ -174,6 +176,10 @@ WAKEWORD_ACTION = _cfg("wakeword_action", "ALTER_TALK_WAKEWORD_ACTION",
                        "record")
 WAKEWORD_SILENCE_LEVEL = _cfg("wakeword_silence_level",
                               "ALTER_TALK_WAKEWORD_SILENCE_LEVEL", 500, float)
+WAKEWORD_ENGINE = _cfg("wakeword_engine", "ALTER_TALK_WAKEWORD_ENGINE",
+                       "sherpa")
+WAKEWORD_KEYWORDS = _cfg("wakeword_keywords", "ALTER_TALK_WAKEWORD_KEYWORDS",
+                         "alter capture:record, alter send:record_send")
 DRY_RUN = _cfg("dry_run", "ALTER_TALK_DRY_RUN", False, _as_bool)
 NORMALIZE = _cfg("normalize", "ALTER_TALK_NORMALIZE", True, _as_bool)
 PROMPT = _cfg("prompt", "ALTER_TALK_PROMPT", "")
@@ -244,11 +250,32 @@ def stop_recording(proc: subprocess.Popen) -> None:
 
 
 # --------------------------------------------------------------------------
-# Wake word listener (OpenWakeWord, streaming via parec)
+# Wake word listener (sherpa-onnx KWS, streaming via parec)
 # --------------------------------------------------------------------------
 _WAKE_MODELS_DIR = Path.home() / ".local/share/alter-talk/models"
 _WAKE_VENV = Path.home() / ".local/share/alter-talk-venv"
 _WAKE_SILENCE_RMS = WAKEWORD_SILENCE_LEVEL / 32768.0
+_SHERPA_MODEL_DIR = _WAKE_MODELS_DIR / \
+    "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
+_SHERPA_KEYWORDS_FILE = _WAKE_MODELS_DIR / "sherpa-kws-keywords.txt"
+_SHERPA_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+               "kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
+               ".tar.bz2")
+
+
+def _parse_keywords(spec: str) -> list[tuple[str, str]]:
+    """'alter capture:record, alter send:record_send' -> [(phrase, action)]."""
+    out: list[tuple[str, str]] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" in part:
+            phrase, action = part.rsplit(":", 1)
+            out.append((phrase.strip(), action.strip()))
+        else:
+            out.append((part, WAKEWORD_ACTION))
+    return out
 
 
 def _wake_model_path(name: str) -> Path:
@@ -277,27 +304,142 @@ def _ensure_wake_model(path: Path, name: str) -> bool:
         return False
 
 
+def _ensure_sherpa_model() -> bool:
+    needed = ["tokens.txt", "bpe.model",
+              "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+              "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+              "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"]
+    if all((_SHERPA_MODEL_DIR / f).is_file() for f in needed):
+        return True
+    _WAKE_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    _log("wakeword: downloading sherpa-onnx KWS model (~17MB) ...")
+    import tarfile
+    try:
+        tmp = _WAKE_MODELS_DIR / "sherpa-kws.tar.bz2.tmp"
+        urllib_request.urlretrieve(_SHERPA_URL, tmp)
+        with tarfile.open(tmp, "r:bz2") as tf:
+            tf.extractall(_WAKE_MODELS_DIR, filter="data")
+        tmp.unlink(missing_ok=True)
+        return all((_SHERPA_MODEL_DIR / f).is_file() for f in needed)
+    except Exception as exc:
+        _log(f"wakeword: sherpa model download failed: {exc}")
+        return False
+
+
+def _ensure_sherpa_keywords() -> bool:
+    """Tokenize the configured phrases into the KWS keywords file."""
+    if _SHERPA_KEYWORDS_FILE.is_file():
+        return True
+    tokens = _SHERPA_MODEL_DIR / "tokens.txt"
+    bpe = _SHERPA_MODEL_DIR / "bpe.model"
+    raw = _WAKE_MODELS_DIR / "sherpa-kws-raw.txt"
+    lines = [f"{phrase.upper()} :1.5 #0.35" for phrase, _ in
+             _parse_keywords(WAKEWORD_KEYWORDS)]
+    raw.write_text("\n".join(lines) + "\n")
+    cli = _WAKE_VENV / "bin" / "sherpa-onnx-cli"
+    try:
+        r = subprocess.run(
+            [str(cli), "text2token", str(raw), "--tokens", str(tokens),
+             "--tokens-type", "bpe", "--bpe-model", str(bpe),
+             str(_SHERPA_KEYWORDS_FILE)],
+            capture_output=True, timeout=60,
+        )
+        if r.returncode != 0:
+            _log(f"wakeword: text2token failed: "
+                 f"{r.stderr.decode(errors='replace')[-200:]}")
+            return False
+        return _SHERPA_KEYWORDS_FILE.is_file()
+    except Exception as exc:
+        _log(f"wakeword: text2token failed: {exc}")
+        return False
+
+
+class _SherpaKws:
+    """sherpa-onnx open-vocabulary keyword spotter (phrase -> action)."""
+
+    def __init__(self) -> None:
+        import sherpa_onnx
+        self.pairs = _parse_keywords(WAKEWORD_KEYWORDS)
+        self.actions = {phrase.casefold(): action
+                        for phrase, action in self.pairs}
+        self.spotter = sherpa_onnx.KeywordSpotter(
+            tokens=str(_SHERPA_MODEL_DIR / "tokens.txt"),
+            encoder=str(_SHERPA_MODEL_DIR /
+                        "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"),
+            decoder=str(_SHERPA_MODEL_DIR /
+                        "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"),
+            joiner=str(_SHERPA_MODEL_DIR /
+                       "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"),
+            keywords_file=str(_SHERPA_KEYWORDS_FILE),
+            num_threads=2, provider="cpu",
+        )
+        self.stream = self.spotter.create_stream()
+
+    def feed(self, audio) -> str | None:
+        """Returns the detected phrase (or None)."""
+        self.stream.accept_waveform(16000, audio)
+        while self.spotter.is_ready(self.stream):
+            self.spotter.decode_stream(self.stream)
+        result = self.spotter.get_result(self.stream)
+        if result:
+            self.spotter.reset_stream(self.stream)
+            return result.strip()
+        if not self.spotter.is_ready(self.stream):
+            self.spotter.reset_stream(self.stream)
+        return None
+
+    def action_for(self, phrase: str) -> str:
+        return self.actions.get(phrase.casefold(), WAKEWORD_ACTION)
+
+    def describe(self) -> str:
+        return "sherpa: " + ", ".join(p for p, _ in self.pairs)
+
+
+class _OwwDetector:
+    """OpenWakeWord single-model detector (fallback engine)."""
+
+    def __init__(self) -> None:
+        from openwakeword.model import Model
+        path = _wake_model_path(WAKEWORD_MODEL)
+        if not _ensure_wake_model(path, WAKEWORD_MODEL):
+            raise RuntimeError("no openwakeword model")
+        self.oww = Model(wakeword_model_paths=[str(path)])
+        self.key = path.stem
+
+    def feed(self, audio) -> str | None:
+        score = float(self.oww.predict(audio).get(self.key, 0.0))
+        return self.key if score >= WAKEWORD_SENSITIVITY else None
+
+    def action_for(self, phrase: str) -> str:
+        return WAKEWORD_ACTION
+
+    def describe(self) -> str:
+        return f"openwakeword: {WAKEWORD_MODEL}"
+
+
 def _wake_listen(self, stop_event: threading.Event) -> None:
-    """Continuous listener: parec -> OpenWakeWord -> record until silence."""
-    # OpenWakeWord lives in the alter-talk venv; make it importable from
-    # the system python the daemon runs under.
+    """Continuous listener: parec -> detector -> record until silence."""
+    # OpenWakeWord/sherpa-onnx live in the alter-talk venv; make them
+    # importable from the system python the daemon runs under.
     try:
         for sp in (_WAKE_VENV / "lib").glob("python*/site-packages"):
             sys.path.insert(0, str(sp))
         import numpy as np
-        from openwakeword.model import Model
     except Exception as exc:
-        _log(f"wakeword: openwakeword not available ({exc}) — listener off")
-        return
-    path = _wake_model_path(WAKEWORD_MODEL)
-    if not _ensure_wake_model(path, WAKEWORD_MODEL):
-        _log("wakeword: no model — listener off")
+        _log(f"wakeword: deps unavailable ({exc}) — listener off")
         return
     try:
-        oww = Model(wakeword_model_paths=[str(path)])
-        model_key = path.stem
+        if WAKEWORD_ENGINE == "sherpa":
+            if not _ensure_sherpa_model() or not _ensure_sherpa_keywords():
+                _log("wakeword: sherpa model/keywords unavailable — listener off")
+                return
+            detector: _SherpaKws | _OwwDetector = _SherpaKws()
+        else:
+            detector = _OwwDetector()
+        _log(f"wakeword: listening ({detector.describe()})")
+        _notify("alter-talk", f"Wake word on: {detector.describe()}")
     except Exception as exc:
-        _log(f"wakeword: model load failed: {exc}")
+        _log(f"wakeword: engine init failed: {exc}")
         return
 
     cmd = ["parec", "--rate", "16000", "--channels", "1", "--format", "s16le"]
@@ -311,8 +453,6 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
         return
     import atexit
     atexit.register(proc.terminate)
-    _log(f"wakeword: listening ({WAKEWORD_MODEL}, sens {WAKEWORD_SENSITIVITY})")
-    _notify("alter-talk", f"Wake word on: {WAKEWORD_MODEL}")
 
     last_trigger = 0.0
     silence_since: float | None = None
@@ -346,13 +486,14 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
 
             if self.recording or now - last_trigger < WAKEWORD_COOLDOWN:
                 continue
-            score = float(oww.predict(audio).get(model_key, 0.0))
-            if score >= WAKEWORD_SENSITIVITY:
+            phrase = detector.feed(audio)
+            if phrase:
                 last_trigger = now
-                _log(f"wakeword: DETECTED ({score:.2f})")
-                _notify("alter-talk", "Wake word detected")
+                action = detector.action_for(phrase)
+                _log(f"wakeword: DETECTED {phrase!r} -> {action}")
+                _notify("alter-talk", f"Wake word detected: {phrase}")
                 self.wake_rec = True
-                self.autosend = WAKEWORD_ACTION == "record_send"
+                self.autosend = action == "record_send"
                 self._start_record()
                 silence_since = None
     except (OSError, ValueError):
@@ -947,7 +1088,9 @@ def _status_main() -> int:
           f"{'yes' if BOTH_SEND_ENTER else 'no'}"
           f" | grace {GRACE}s | max hold {MAX_HOLD}s | min rec {MIN_RECORDING}s")
     print(f"normalize: {'on' if NORMALIZE else 'off'}")
-    print(f"wakeword:  {'on (' + WAKEWORD_MODEL + ', ' + WAKEWORD_ACTION + ')' if WAKEWORD_ENABLED else 'off'}")
+    print(f"wakeword:  {'on (' + WAKEWORD_ENGINE + ')' if WAKEWORD_ENABLED else 'off'}")
+    if WAKEWORD_ENABLED:
+        print(f"           {WAKEWORD_KEYWORDS}")
     if RECORD_TARGET:
         src = RECORD_TARGET
     else:
@@ -1011,6 +1154,8 @@ _SETUP_FIELDS = [
     ("wakeword_stop_silence", "Wake word stop on silence, s",    float),
     ("wakeword_action",    "Wake word action (record/record_send)", str),
     ("wakeword_silence_level", "Wake word silence RMS level",    float),
+    ("wakeword_engine",    "Wake word engine (sherpa/openwakeword)", str),
+    ("wakeword_keywords",  "Keywords (phrase:action, comma-sep)", str),
 ]
 
 
@@ -1037,6 +1182,8 @@ def _field_defaults() -> dict:
         "wakeword_stop_silence": 1.5,
         "wakeword_action": "record",
         "wakeword_silence_level": 500.0,
+        "wakeword_engine": "sherpa",
+        "wakeword_keywords": "alter capture:record, alter send:record_send",
     }
 
 

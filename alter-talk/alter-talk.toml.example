@@ -31,13 +31,15 @@ normalize = true
 # record_target = "default"
 # record_target = "alsa_input.pci-0000_00_1f.3.analog-stereo"
 
-# Wake word listener (OpenWakeWord, venv at ~/.local/share/alter-talk-venv).
-# Model auto-downloads from GitHub releases on first run.
+# Wake word listener (sherpa-onnx KWS by default; venv at
+# ~/.local/share/alter-talk-venv, model auto-downloads on first run).
 # wakeword_enabled = false
-# wakeword_model = "hey_jarvis"   # pretrained name or path to a .onnx
-# wakeword_sensitivity = 0.5      # 0..1 detection threshold
+# wakeword_engine = "sherpa"      # sherpa (open-vocab phrases) | openwakeword
+# wakeword_keywords = "alter capture:record, alter send:record_send"
+#   phrase:action pairs — record (clipboard) | record_send (paste+Enter)
+# wakeword_sensitivity = 0.5      # openwakeword only, 0..1
 # wakeword_cooldown = 2.0         # seconds between triggers
 # wakeword_max_record = 30.0      # cap for recording after a trigger
 # wakeword_stop_silence = 1.5     # seconds of silence end the recording
-# wakeword_action = "record"      # record (clipboard) | record_send (paste+Enter)
 # wakeword_silence_level = 500    # RMS below this counts as silence
+# wakeword_model = "hey_jarvis"   # openwakeword only: name or .onnx path
