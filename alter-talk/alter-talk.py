@@ -72,11 +72,9 @@ whisper_container = "whisper-local"
 max_hold = 60          # seconds; force-finish a stuck recording
 min_recording = 0.5    # seconds; shorter recordings are discarded
 
-# Send mode (Scroll Lock / both keys)
+# Send mode
 paste_combo = "ctrl+shift+v"   # injected as a modifier combo (layout-proof)
 send_enter = true              # global default: also press Enter after pasting
-scroll_send_enter = true       # Scroll Lock tap: Enter after paste
-both_send_enter = true         # both keys held: Enter after paste
 
 # Both-keys detection window (seconds): Scroll Lock pressed this long before
 # Pause is still treated as "both held".
@@ -104,7 +102,6 @@ wakeword_sensitivity = 0.5        # 0..1 detection threshold
 wakeword_cooldown = 2.0           # seconds between triggers
 wakeword_grace = 3.0              # keep recording through silence right after
                                   # a trigger, so you have time to start speaking
-wakeword_max_record = 30.0        # cap for recording after a trigger
 wakeword_stop_silence = 1.5       # seconds of silence end the recording
 wakeword_action = "record"        # record (clipboard) | record_send (paste+Enter)
 wakeword_silence_level = 500      # RMS below this counts as silence (0..32768)
@@ -167,11 +164,6 @@ DAEMON_LOCK_PATH = Path(_cfg("daemon_lock_path", "ALTER_TALK_DAEMON_LOCK",
 PASTE_COMBO = _cfg("paste_combo", "ALTER_TALK_PASTE_COMBO",
                    "ctrl+shift+v", str.lower)
 SEND_ENTER = _cfg("send_enter", "ALTER_TALK_SEND_ENTER", True, _as_bool)
-# Per-trigger "Enter after paste" (fall back to the global send_enter)
-SCROLL_SEND_ENTER = _cfg("scroll_send_enter", "ALTER_TALK_SCROLL_SEND_ENTER",
-                         SEND_ENTER, _as_bool)
-BOTH_SEND_ENTER = _cfg("both_send_enter", "ALTER_TALK_BOTH_SEND_ENTER",
-                       SEND_ENTER, _as_bool)
 # Wake word listener (engine WIP — config schema is ready)
 WAKEWORD_ENABLED = _cfg("wakeword_enabled", "ALTER_TALK_WAKEWORD_ENABLED",
                         False, _as_bool)
@@ -183,8 +175,6 @@ WAKEWORD_COOLDOWN = _cfg("wakeword_cooldown", "ALTER_TALK_WAKEWORD_COOLDOWN",
                          2.0, float)
 WAKEWORD_GRACE = _cfg("wakeword_grace", "ALTER_TALK_WAKEWORD_GRACE",
                       3.0, float)
-WAKEWORD_MAX_RECORD = _cfg("wakeword_max_record",
-                           "ALTER_TALK_WAKEWORD_MAX_RECORD", 30.0, float)
 WAKEWORD_STOP_SILENCE = _cfg("wakeword_stop_silence",
                              "ALTER_TALK_WAKEWORD_STOP_SILENCE", 1.5, float)
 WAKEWORD_ACTION = _cfg("wakeword_action", "ALTER_TALK_WAKEWORD_ACTION",
@@ -237,9 +227,8 @@ WAKEWORD_DEBUG = _cfg("wakeword_debug", "ALTER_TALK_WAKEWORD_DEBUG",
 DRY_RUN = _cfg("dry_run", "ALTER_TALK_DRY_RUN", False, _as_bool)
 NORMALIZE = _cfg("normalize", "ALTER_TALK_NORMALIZE", True, _as_bool)
 PROMPT = _cfg("prompt", "ALTER_TALK_PROMPT", "")
-KEEP_AUDIO_DIR = Path(_cfg(
-    "keep_audio_dir", "ALTER_TALK_KEEP_AUDIO_DIR", ""
-)).expanduser() if _cfg("keep_audio_dir", "ALTER_TALK_KEEP_AUDIO_DIR", "") else None
+_keep_audio_dir = _cfg("keep_audio_dir", "ALTER_TALK_KEEP_AUDIO_DIR", "")
+KEEP_AUDIO_DIR = Path(_keep_audio_dir).expanduser() if _keep_audio_dir else None
 # "default"/"auto"/"" = record from the system default source (PipeWire
 # picks it, e.g. the EasyEffects chain); any other value = explicit device.
 RECORD_TARGET = _cfg("record_target", "ALTER_TALK_RECORD_TARGET", "")
@@ -584,7 +573,7 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
                         silence_since = None
                 else:
                     silence_since = None
-                if now - self.rec_t0 > WAKEWORD_MAX_RECORD:
+                if now - self.rec_t0 > MAX_HOLD:
                     _log("wakeword: max record — finishing")
                     self._finish_record(from_wake=True)
                     self.wake_rec = False
@@ -599,7 +588,7 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
                 _log(f"wakeword: DETECTED {phrase!r} -> {action}")
                 if action == "paste":
                     _notify("alter-talk", f"Paste (wake word: {phrase})")
-                    self._inject_q.put(SCROLL_SEND_ENTER)
+                    self._inject_q.put(SEND_ENTER)
                     continue
                 _notify("alter-talk", f"Wake word detected: {phrase}")
                 self.wake_rec = True
@@ -900,6 +889,24 @@ def _watch_devices():
 # --------------------------------------------------------------------------
 # Recording cycle (shared by daemon and one-shot modes)
 # --------------------------------------------------------------------------
+def _transcribe_copy(wav: Path) -> tuple[str, str]:
+    """Transcribe -> normalize -> copy to clipboard. Returns (text, preview).
+    Raises RuntimeError with a user-facing message on any failure."""
+    try:
+        text = transcribe(wav)
+    except Exception as exc:
+        raise RuntimeError(f"STT error: {exc}") from exc
+    text = normalize_text(text)
+    if not text:
+        raise RuntimeError("Nothing recognized")
+    try:
+        copy_to_clipboard(text)
+    except Exception as exc:
+        raise RuntimeError(f"Copy failed: {exc}") from exc
+    preview = text if len(text) <= 100 else text[:100] + "…"
+    return text, preview
+
+
 def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
     """Record -> transcribe -> copy; auto-send if autosend. Returns exit code."""
     tmp_dir = Path(tempfile.mkdtemp(prefix="alter-talk-"))
@@ -946,31 +953,15 @@ def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
         if not wav_path.is_file() or wav_path.stat().st_size == 0:
             _notify("alter-talk", "Error: empty recording file")
             return 1
-
-        _notify("alter-talk", "Processing speech...")
         try:
-            text = transcribe(wav_path)
-        except Exception as exc:
-            _notify("alter-talk", f"Recognition error: {exc}")
+            text, preview = _transcribe_copy(wav_path)
+        except RuntimeError as exc:
             print(f"alter-talk: {exc}", file=sys.stderr)
+            _notify("alter-talk", str(exc))
             return 1
-        text = normalize_text(text)
-
-        if not text:
-            _notify("alter-talk", "Nothing recognized")
-            return 0
-
-        try:
-            copy_to_clipboard(text)
-        except Exception as exc:
-            _notify("alter-talk", f"Failed to copy: {exc}")
-            print(f"alter-talk: {exc}", file=sys.stderr)
-            return 1
-        preview = text if len(text) <= 100 else text[:100] + "…"
-
         if autosend:
             try:
-                send_keys(enter=BOTH_SEND_ENTER)
+                send_keys()
             except Exception as exc:
                 _notify("alter-talk", f"Copied, but not sent: {exc}")
                 return 1
@@ -1047,34 +1038,24 @@ class _Daemon:
             _notify("alter-talk", "Processing speech...")
             _write_state(state="processing")
             try:
-                text = transcribe(wav)
-                _log(f"stt ok ({len(text)} chars)")
-            except Exception as exc:
+                text, preview = _transcribe_copy(wav)
+                _log(f"stt ok ({len(text)} chars) result: {preview!r}")
+            except RuntimeError as exc:
                 _log(f"stt error: {exc}")
-                _write_state(state="error", text=str(exc)[:200])
-                _notify("alter-talk", f"Recognition error: {exc}")
+                _write_state(
+                    state="idle" if str(exc) == "Nothing recognized" else "error",
+                    text=str(exc)[:200],
+                )
+                _notify("alter-talk", str(exc))
                 return
-            text = normalize_text(text)
-            if not text:
-                _write_state(state="idle")
-                _notify("alter-talk", "Nothing recognized")
-                return
-            try:
-                copy_to_clipboard(text)
-            except Exception as exc:
-                _write_state(state="error", text=str(exc)[:200])
-                _notify("alter-talk", f"Failed to copy: {exc}")
-                return
-            preview = text if len(text) <= 100 else text[:100] + "…"
-            _log(f"result: {preview!r}")
             if autosend:
                 if from_wake:
                     # Inject from the main loop, not this thread — the same
                     # context that performs key-driven injections.
-                    self._inject_q.put(BOTH_SEND_ENTER)
+                    self._inject_q.put(SEND_ENTER)
                 else:
                     try:
-                        send_keys(enter=BOTH_SEND_ENTER)
+                        send_keys()
                     except Exception as exc:
                         _write_state(state="error", text=str(exc)[:200])
                         _notify("alter-talk", f"Copied, but not sent: {exc}")
@@ -1150,7 +1131,7 @@ class _Daemon:
             if self.grace_deadline is not None and now >= self.grace_deadline:
                 self.grace_deadline = None
                 try:
-                    send_keys(enter=SCROLL_SEND_ENTER)
+                    send_keys()
                 except Exception as exc:
                     _notify("alter-talk", f"Failed to send: {exc}")
             # MAX_HOLD safety: force-finish a stuck recording.
@@ -1218,9 +1199,8 @@ def _status_main() -> int:
     print(f"stt:       {WHISPER_URL}")
     print("keys:      Pause = record->clipboard | Scroll Lock = paste+Enter |"
           " both = record->paste+Enter")
-    print(f"paste:     {PASTE_COMBO} | Scroll Lock Enter: "
-          f"{'yes' if SCROLL_SEND_ENTER else 'no'} | both Enter: "
-          f"{'yes' if BOTH_SEND_ENTER else 'no'}"
+    print(f"paste:     {PASTE_COMBO} | Enter: "
+          f"{'yes' if SEND_ENTER else 'no'}"
           f" | grace {GRACE}s | max hold {MAX_HOLD}s | min rec {MIN_RECORDING}s")
     print(f"normalize: {'on' if NORMALIZE else 'off'}")
     print(f"wakeword:  {'on (' + WAKEWORD_ENGINE + ')' if WAKEWORD_ENABLED else 'off'}")
@@ -1273,9 +1253,7 @@ _SETUP_FIELDS = [
     ("whisper_container",  "Docker container to wake",           str),
     ("record_target",      "Record source (default=system)",    str),
     ("paste_combo",        "Paste shortcut (uinput combo)",      str),
-    ("send_enter",         "Enter after paste (global default)", bool),
-    ("scroll_send_enter",  "Scroll Lock tap: Enter after paste", bool),
-    ("both_send_enter",    "Both keys: Enter after paste",       bool),
+    ("send_enter",         "Enter after paste",                   bool),
     ("max_hold",           "Max hold, seconds (stuck guard)",    float),
     ("min_recording",      "Min recording, seconds",             float),
     ("grace",              "Both-keys window, seconds",          float),
@@ -1285,7 +1263,6 @@ _SETUP_FIELDS = [
     ("wakeword_model",     "Wake word model (pretrained)",       str),
     ("wakeword_sensitivity", "Wake word sensitivity (0..1)",     float),
     ("wakeword_cooldown",  "Wake word cooldown, seconds",        float),
-    ("wakeword_max_record", "Wake word max record, seconds",     float),
     ("wakeword_stop_silence", "Wake word stop on silence, s",    float),
     ("wakeword_action",    "Wake word action (record/record_send)", str),
     ("wakeword_silence_level", "Wake word silence RMS level",    float),
@@ -1307,8 +1284,6 @@ def _field_defaults() -> dict:
         "record_target": "default",
         "paste_combo": "ctrl+shift+v",
         "send_enter": True,
-        "scroll_send_enter": True,
-        "both_send_enter": True,
         "max_hold": 60.0,
         "min_recording": 0.5,
         "grace": 0.15,
@@ -1318,7 +1293,6 @@ def _field_defaults() -> dict:
         "wakeword_model": "hey_jarvis",
         "wakeword_sensitivity": 0.5,
         "wakeword_cooldown": 2.0,
-        "wakeword_max_record": 30.0,
         "wakeword_stop_silence": 1.5,
         "wakeword_action": "record",
         "wakeword_silence_level": 500.0,
@@ -1377,11 +1351,9 @@ def _health_check(url: str) -> str:
 
 
 def _daemon_pids() -> list[int]:
-    import subprocess as sp
-
     # Match only the daemon python process (not bash wrappers / other CLIs).
-    out = sp.run(["pgrep", "-f", "python3 .*alter-talk"],
-                 capture_output=True, text=True)
+    out = subprocess.run(["pgrep", "-f", "python3 .*alter-talk"],
+                         capture_output=True, text=True)
     pids = []
     for pid in out.stdout.split():
         try:
@@ -1546,7 +1518,7 @@ def _send_main() -> int:
         _notify("alter-talk", "Recording in progress — skipping paste")
         return 0
     try:
-        send_keys(enter=SCROLL_SEND_ENTER)
+        send_keys()
     except Exception as exc:
         _notify("alter-talk", f"Failed to send: {exc}")
         return 1
