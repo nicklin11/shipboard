@@ -1084,7 +1084,9 @@ def _health_check(url: str) -> str:
 def _daemon_pids() -> list[int]:
     import subprocess as sp
 
-    out = sp.run(["pgrep", "-f", "alter-talk"], capture_output=True, text=True)
+    # Match only the daemon python process (not bash wrappers / other CLIs).
+    out = sp.run(["pgrep", "-f", "python3 .*alter-talk"],
+                 capture_output=True, text=True)
     pids = []
     for pid in out.stdout.split():
         try:
@@ -1092,18 +1094,19 @@ def _daemon_pids() -> list[int]:
         except ValueError:
             continue
         if pid == os.getpid():
-            continue  # never kill our own TUI process
+            continue  # never kill our own CLI process
         pids.append(pid)
     return pids
 
 
 def _restart_daemon() -> str:
     try:
-        subprocess.run(
+        r = subprocess.run(
             ["systemctl", "--user", "restart", "alter-talk"],
             capture_output=True, timeout=15,
         )
-        return "restarted via systemd"
+        if r.returncode == 0:
+            return "restarted via systemd"
     except Exception:
         pass
     for pid in _daemon_pids():
@@ -1111,6 +1114,7 @@ def _restart_daemon() -> str:
             os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
+    time.sleep(0.4)  # let the old daemon release its flock
     subprocess.Popen(
         [sys.executable, str(Path(sys.argv[0]).resolve())],
         start_new_session=True,
