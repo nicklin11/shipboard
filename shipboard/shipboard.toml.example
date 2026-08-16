@@ -7,10 +7,21 @@
 whisper_url = "http://127.0.0.1:10300/inference"
 whisper_health_url = "http://127.0.0.1:10300/health"
 whisper_container = "whisper-local"
+whisper_language = "auto"   # whisper language: auto / ru / en / ...
 
 # Recording
 max_hold = 60          # seconds; force-finish a stuck recording
 min_recording = 0.5    # seconds; shorter recordings are discarded
+record_rate = 16000    # sample rate for pw-record and the wake listener
+record_channels = 1    # channels for pw-record and the wake listener
+
+# Keys the daemon listens on (evdev names, see linux/input-event-codes.h:
+# pause, scrolllock, insert, home, f13, ...). Defaults: Pause/ScrollLock.
+# An empty string ("") disables a trigger entirely (wake words still work).
+key_record = "pause"
+key_send = "scrolllock"
+# key_record_send = "insert"   # optional: single key for record + paste + Enter
+key_record_mode = "hold"        # hold: record while held | toggle: press to start/stop
 
 # Send mode (Scroll Lock / both keys)
 paste_combo = "ctrl+shift+v"   # injected as a modifier combo (layout-proof)
@@ -43,3 +54,4 @@ normalize = true
 # wakeword_stop_silence = 1.5     # seconds of silence end the recording
 # wakeword_silence_level = 500    # RMS below this counts as silence
 # wakeword_model = "hey_jarvis"   # openwakeword only: name or .onnx path
+# kws_threads = 2                 # sherpa KWS: onnxruntime threads

@@ -65,15 +65,21 @@ DEFAULT_CONFIG_TEXT = """\
 whisper_url = "http://127.0.0.1:10300/inference"
 whisper_health_url = "http://127.0.0.1:10300/health"
 whisper_container = "whisper-local"
+whisper_language = "auto"  # whisper language: auto / ru / en / ...
 
 # Recording
 max_hold = 60          # seconds; force-finish a stuck recording
 min_recording = 0.5    # seconds; shorter recordings are discarded
+record_rate = 16000    # sample rate for pw-record and the wake listener
+record_channels = 1    # channels for pw-record and the wake listener
 
 # Keys the daemon listens on (evdev names, see linux/input-event-codes.h:
 # pause, scrolllock, insert, home, f13, ...). Defaults: Pause/ScrollLock.
+# An empty string ("") disables a trigger entirely (wake words still work).
 key_record = "pause"
 key_send = "scrolllock"
+key_record_send = ""            # optional: single key for record + paste + Enter
+key_record_mode = "hold"        # hold: record while held | toggle: press to start/stop
 
 # Send mode (Scroll Lock / both keys)
 paste_combo = "ctrl+shift+v"   # injected as a modifier combo (layout-proof)
@@ -109,6 +115,7 @@ wakeword_action = "record"        # record (clipboard) | record_send (paste+Ente
 wakeword_silence_level = 500      # RMS below this counts as silence (0..32768)
 wakeword_sherpa_score = 1.0       # sherpa KWS: boost for matched keywords
 wakeword_sherpa_threshold = 0.25  # sherpa KWS: trigger bar (lower=easier)
+kws_threads = 2                   # sherpa KWS: onnxruntime threads
 # Wake phrases per action, comma-separated alternatives (at least two words
 # each to avoid random triggers; edit with `shipboard setup`):
 wakeword_record = "copy it, take it, grab it, catch it"  # record -> clipboard only
@@ -173,6 +180,8 @@ _KEY_LABELS = {
 
 
 def _key_label(name: str) -> str:
+    if not name:
+        return "off"
     return _KEY_LABELS.get(name, name.replace("_", " ").title())
 
 
@@ -182,6 +191,8 @@ HEALTH_URL = _cfg("whisper_health_url", "WHISPER_CPP_HEALTH_URL",
                   "http://127.0.0.1:10300/health")
 WHISPER_CONTAINER = _cfg("whisper_container", "WHISPER_CONTAINER",
                          "whisper-local")
+WHISPER_LANGUAGE = _cfg("whisper_language", "SHIPBOARD_WHISPER_LANGUAGE",
+                        "auto")
 IDLE_MARKER = Path(_cfg("idle_marker", "WHISPER_IDLE_MARKER",
                         "/tmp/whisper-local-last-use"))
 MAX_HOLD = _cfg("max_hold", "SHIPBOARD_MAX_HOLD", 60.0, float)
@@ -189,8 +200,13 @@ MIN_RECORDING = _cfg("min_recording", "SHIPBOARD_MIN_RECORDING", 0.5, float)
 GRACE = _cfg("grace", "SHIPBOARD_GRACE", 0.15, float)  # SL->Pause window
 KEY_RECORD = _cfg("key_record", "SHIPBOARD_KEY_RECORD", "pause")
 KEY_SEND = _cfg("key_send", "SHIPBOARD_KEY_SEND", "scrolllock")
-RATE = 16000
-CHANNELS = 1
+KEY_RECORD_SEND = _cfg("key_record_send", "SHIPBOARD_KEY_RECORD_SEND", "")
+KEY_RECORD_MODE = _cfg("key_record_mode", "SHIPBOARD_KEY_RECORD_MODE",
+                       "hold", str.lower)
+if KEY_RECORD_MODE not in ("hold", "toggle"):
+    KEY_RECORD_MODE = "hold"
+RATE = _cfg("record_rate", "SHIPBOARD_RECORD_RATE", 16000, int)
+CHANNELS = _cfg("record_channels", "SHIPBOARD_RECORD_CHANNELS", 1, int)
 LOCK_PATH = Path(_cfg("lock_path", "SHIPBOARD_LOCK", "/tmp/shipboard.lock"))
 DAEMON_LOCK_PATH = Path(_cfg("daemon_lock_path", "SHIPBOARD_DAEMON_LOCK",
                              "/tmp/shipboard.daemon.lock"))
@@ -223,6 +239,7 @@ WAKEWORD_SHERPA_SCORE = _cfg("wakeword_sherpa_score",
 WAKEWORD_SHERPA_THRESHOLD = _cfg("wakeword_sherpa_threshold",
                                  "SHIPBOARD_WAKEWORD_SHERPA_THRESHOLD",
                                  0.25, float)
+KWS_THREADS = _cfg("kws_threads", "SHIPBOARD_KWS_THREADS", 2, int)
 # Per-action wake words (edited with `shipboard setup`) compose the KWS
 # phrase list; the raw wakeword_keywords key stays for hand-edited configs.
 _WAKE_WORD_ACTIONS = (
@@ -268,15 +285,46 @@ RECORD_TARGET = _cfg("record_target", "SHIPBOARD_RECORD_TARGET", "")
 if RECORD_TARGET.lower() in ("default", "auto", "system"):
     RECORD_TARGET = ""
 
-_COMBO_KEYS = {
-    "ctrl": 29,        # KEY_LEFTCTRL
-    "shift": 42,       # KEY_LEFTSHIFT
-    "alt": 56,         # KEY_LEFTALT
-    "super": 125,      # KEY_LEFTMETA
-    "v": KEY_V,
-    "insert": KEY_INSERT,
-    "enter": KEY_ENTER,
-}
+_MODIFIER_KEYS = ("ctrl", "shift", "alt", "super")
+
+_COMBO_KEYS: dict[str, int] = {}
+
+
+def _combo_keys() -> dict[str, int]:
+    """Key table for uinput injection: letters a-z, digits 0-9, f1-f24,
+    common editing keys + ctrl/shift/alt/super. Built from evdev ecodes on
+    first use (kept lazy so CLI-only subcommands never need evdev)."""
+    if not _COMBO_KEYS:
+        import evdev
+
+        e = evdev.ecodes
+        keys = {
+            "ctrl": e.KEY_LEFTCTRL,
+            "shift": e.KEY_LEFTSHIFT,
+            "alt": e.KEY_LEFTALT,
+            "super": e.KEY_LEFTMETA,
+            "v": e.KEY_V,
+            "insert": e.KEY_INSERT,
+            "enter": e.KEY_ENTER,
+        }
+        for i in range(26):
+            keys[chr(ord("a") + i)] = getattr(e, f"KEY_{chr(ord('A') + i)}")
+        for d in range(10):
+            keys[str(d)] = getattr(e, f"KEY_{d}")
+        for f in range(1, 25):
+            keys[f"f{f}"] = getattr(e, f"KEY_F{f}")
+        keys.update({
+            "space": e.KEY_SPACE,
+            "tab": e.KEY_TAB,
+            "home": e.KEY_HOME,
+            "end": e.KEY_END,
+            "pageup": e.KEY_PAGEUP,
+            "pagedown": e.KEY_PAGEDOWN,
+            "delete": e.KEY_DELETE,
+            "backspace": e.KEY_BACKSPACE,
+        })
+        _COMBO_KEYS.update(keys)
+    return _COMBO_KEYS
 
 
 def _notify(title: str, msg: str) -> None:
@@ -454,7 +502,7 @@ class _SherpaKws:
             joiner=str(_SHERPA_MODEL_DIR /
                        "joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx"),
             keywords_file=str(_SHERPA_KEYWORDS_FILE),
-            num_threads=2, provider=_provider,
+            num_threads=KWS_THREADS, provider=_provider,
             keywords_score=WAKEWORD_SHERPA_SCORE,
             keywords_threshold=WAKEWORD_SHERPA_THRESHOLD,
         )
@@ -509,8 +557,8 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
         _log(f"wakeword: engine init failed: {exc}")
         return
 
-    cmd = ["pw-cat", "--record", "--rate", "16000", "--channels", "1",
-           "--format", "s16", "--raw", "-"]
+    cmd = ["pw-cat", "--record", "--rate", str(RATE), "--channels",
+           str(CHANNELS), "--format", "s16", "--raw", "-"]
     if RECORD_TARGET:
         cmd += ["--target", RECORD_TARGET]
     try:
@@ -527,7 +575,7 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
     next_level_log = 0.0
     try:
         while not stop_event.is_set():
-            raw = proc.stdout.read(2560)  # 1280 samples = 80 ms
+            raw = proc.stdout.read(int(RATE * CHANNELS * 2 * 0.08))  # 80 ms
             if not raw:
                 break
             audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
@@ -651,7 +699,7 @@ def _ensure_server(timeout: float = 60.0) -> None:
 
 def transcribe(wav_path: Path) -> str:
     _ensure_server()
-    fields = {"language": "auto"}
+    fields = {"language": WHISPER_LANGUAGE}
     if PROMPT:
         fields["prompt"] = PROMPT
     body, content_type = _multipart_body(fields, wav_path)
@@ -779,7 +827,7 @@ def _inject_via_wtype(combo: str, enter: bool) -> bool:
     if not wtype:
         return False
     parts = combo.split("+")
-    if not parts or parts[-1] not in ("v", "insert"):
+    if not parts or parts[-1] in _MODIFIER_KEYS:
         return False
     cmd = [wtype]
     for mod in parts[:-1]:
@@ -798,15 +846,17 @@ def _inject_uinput(combo: str, enter: bool) -> None:
     from evdev import UInput, ecodes
 
     parts = combo.split("+")
-    if len(parts) < 2 or parts[-1] not in ("v", "insert", "enter"):
+    if len(parts) < 2 or parts[-1] in _MODIFIER_KEYS:
         raise ValueError(f"unsupported combo: {combo!r}")
+    keys_map = _combo_keys()
     mods = []
     for part in parts[:-1]:
-        code = _COMBO_KEYS.get(part)
-        if code is None:
-            raise ValueError(f"unknown key in combo: {part!r}")
-        mods.append(code)
-    key = _COMBO_KEYS[parts[-1]]
+        if part not in _MODIFIER_KEYS:
+            raise ValueError(f"unknown modifier in combo: {part!r}")
+        mods.append(keys_map[part])
+    key = keys_map.get(parts[-1])
+    if key is None:
+        raise ValueError(f"unknown key in combo: {parts[-1]!r}")
 
     keys = set(mods) | {key} | ({KEY_ENTER} if enter else set())
     ui = UInput(
@@ -855,13 +905,16 @@ def send_keys(combo: str = PASTE_COMBO, enter: bool = SEND_ENTER) -> None:
 def _watch_devices():
     import evdev
 
+    wanted = {_key_code(k) for k in (KEY_RECORD, KEY_SEND, KEY_RECORD_SEND) if k}
+    if not wanted:
+        return []
     devices = []
     for path in evdev.list_devices():
         try:
             dev = evdev.InputDevice(path)
             caps = dev.capabilities(verbose=False)
             keys = caps.get(evdev.ecodes.EV_KEY, [])
-            if (_key_code(KEY_RECORD) in keys or _key_code(KEY_SEND) in keys):
+            if keys and wanted & set(keys):
                 devices.append(dev)
         except Exception:
             continue
@@ -894,16 +947,17 @@ def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
     tmp_dir = Path(tempfile.mkdtemp(prefix="shipboard-"))
     try:
         wav_path = tmp_dir / "rec.wav"
+        mode_word = "press" if KEY_RECORD_MODE == "toggle" else "hold"
         _notify(
             "shipboard",
-            f"Recording... (hold {_key_label(KEY_RECORD)})"
+            f"Recording... ({mode_word} {_key_label(KEY_RECORD)})"
             + (" — release: will paste and send" if autosend else ""),
         )
         proc = start_recording(wav_path)
         t0 = time.monotonic()
         if seconds > 0:
             time.sleep(seconds)
-        else:
+        elif KEY_RECORD:
             import evdev
 
             deadline = time.monotonic() + MAX_HOLD
@@ -993,7 +1047,9 @@ class _Daemon:
         self._tmp_dir = tmp_dir
         _write_state(state="recording")
         _log(f"record start -> {wav}")
-        _notify("shipboard", f"Recording... (hold {_key_label(KEY_RECORD)})")
+        mode_word = "press" if KEY_RECORD_MODE == "toggle" else "hold"
+        _notify("shipboard",
+                f"Recording... ({mode_word} {_key_label(KEY_RECORD)})")
 
     def _finish_record(self, from_wake: bool = False) -> None:
         if not self.recording or self.rec_proc is None:
@@ -1059,6 +1115,19 @@ class _Daemon:
                     pass
 
     def _on_pause(self, value: int) -> None:
+        if KEY_RECORD_MODE == "toggle":
+            if value != 1:  # release/repeat: nothing (toggle needs no release)
+                return
+            if self.recording:
+                self._finish_record()
+                return
+            # Was a Scroll Lock tap waiting in grace? Then this is both-held.
+            was_grace = self.grace_deadline is not None
+            self.grace_deadline = None
+            self._start_record()
+            if was_grace:
+                self.autosend = True
+            return
         if value == 1:  # press
             if self.recording:
                 return
@@ -1070,6 +1139,30 @@ class _Daemon:
                 self.autosend = True
         elif value == 0:  # release
             self.pause_down = False
+            self._finish_record()
+
+    def _on_record_send(self, value: int) -> None:
+        """Third trigger: single key that records AND sends (autosend=True),
+        like Pause+ScrollLock held but with one key."""
+        if KEY_RECORD_MODE == "toggle":
+            if value != 1:  # toggle needs no release
+                return
+            if self.recording:
+                self._finish_record()
+                return
+            self.grace_deadline = None
+            self._start_record()
+            if self.recording:
+                self.autosend = True
+            return
+        if value == 1:  # press
+            if self.recording:
+                return
+            self.grace_deadline = None
+            self._start_record()
+            if self.recording:
+                self.autosend = True
+        elif value == 0:  # release
             self._finish_record()
 
     def _on_scrolllock(self, value: int) -> None:
@@ -1094,8 +1187,12 @@ class _Daemon:
                 target=_wake_listen, args=(self, stop_event), daemon=True
             ).start()
         devices = _watch_devices()
-        if not devices:
-            _notify("shipboard", "Daemon: Pause/ScrollLock keys not found on evdev")
+        rec_code = _key_code(KEY_RECORD) if KEY_RECORD else None
+        send_code = _key_code(KEY_SEND) if KEY_SEND else None
+        rec_send_code = _key_code(KEY_RECORD_SEND) if KEY_RECORD_SEND else None
+        if not devices and (rec_code, send_code, rec_send_code) != (None,) * 3:
+            _notify("shipboard",
+                    "Daemon: trigger keys not found on evdev (wake words still on)")
         while True:
             now = time.monotonic()
             # Wake word thread requests injections via the queue; the main
@@ -1132,12 +1229,14 @@ class _Daemon:
                             continue
                         if event.value == 2:  # auto-repeat
                             continue
-                        if event.code == _key_code(KEY_RECORD):
+                        if rec_code is not None and event.code == rec_code:
                             if event.value == 1:
                                 self.pause_down = True
                             self._on_pause(event.value)
-                        elif event.code == _key_code(KEY_SEND):
+                        elif send_code is not None and event.code == send_code:
                             self._on_scrolllock(event.value)
+                        elif rec_send_code is not None and event.code == rec_send_code:
+                            self._on_record_send(event.value)
                 except (OSError, ValueError):
                     devices = [d for d in devices if d != dev]
                     try:
@@ -1180,8 +1279,10 @@ def _status_main() -> int:
     print(f"config:    {DEFAULT_CONFIG_PATH}")
     print(f"stt:       {WHISPER_URL}")
     rl, sl = _key_label(KEY_RECORD), _key_label(KEY_SEND)
-    print(f"keys:      {rl} = record->clipboard | {sl} = paste+Enter |"
-          f" both = record->paste+Enter")
+    print(f"keys:      {rl} = record->clipboard ({KEY_RECORD_MODE}) |"
+          f" {sl} = paste+Enter | both = record->paste+Enter")
+    if KEY_RECORD_SEND:
+        print(f"           {_key_label(KEY_RECORD_SEND)} = record->paste+Enter")
     print(f"paste:     {PASTE_COMBO} | {sl} Enter: "
           f"{'yes' if SCROLL_SEND_ENTER else 'no'} | both Enter: "
           f"{'yes' if BOTH_SEND_ENTER else 'no'}"
@@ -1235,7 +1336,10 @@ _SETUP_FIELDS = [
     ("whisper_url",        "STT server URL (wake/tailnet proxy)", str),
     ("whisper_health_url", "Health URL",                          str),
     ("whisper_container",  "Docker container to wake",           str),
+    ("whisper_language",   "Whisper language (auto/ru/en/...)",  str),
     ("record_target",      "Record source (default=system)",    str),
+    ("record_rate",        "Recording sample rate",             int),
+    ("record_channels",    "Recording channels",                int),
     ("paste_combo",        "Paste shortcut (uinput combo)",      str),
     ("send_enter",         "Enter after paste (global default)", bool),
     ("scroll_send_enter",  "Scroll Lock tap: Enter after paste", bool),
@@ -1245,6 +1349,8 @@ _SETUP_FIELDS = [
     ("grace",              "Both-keys window, seconds",          float),
     ("key_record",         "Record key (evdev name, e.g. pause)", str),
     ("key_send",           "Send key (evdev name, e.g. scrolllock)", str),
+    ("key_record_send",    "Record+send key (evdev name, optional)", str),
+    ("key_record_mode",    "Record key mode (hold/toggle)",       str),
     ("normalize",          "Dictation symbols (слэш/дэш/...) ",  bool),
     ("prompt",             "Initial whisper prompt (optional)",  str),
     ("wakeword_enabled",   "Wake word listener (engine WIP)",    bool),
@@ -1254,6 +1360,7 @@ _SETUP_FIELDS = [
     ("wakeword_silence_level", "Wake word silence RMS level",    float),
     ("wakeword_sherpa_score", "Sherpa KWS score boost (sensitivity)", float),
     ("wakeword_sherpa_threshold", "Sherpa KWS threshold (lower=easier)", float),
+    ("kws_threads",        "Sherpa KWS onnxruntime threads",     int),
     ("wakeword_record",    "Wake word: record (copy only)",        str),
     ("wakeword_send",      "Wake word: record+send (paste+Enter)", str),
     ("wakeword_paste",     "Wake word: paste (clipboard)",         str),
@@ -1266,7 +1373,10 @@ def _field_defaults() -> dict:
         "whisper_url": "http://127.0.0.1:10300/inference",
         "whisper_health_url": "http://127.0.0.1:10300/health",
         "whisper_container": "whisper-local",
+        "whisper_language": "auto",
         "record_target": "default",
+        "record_rate": 16000,
+        "record_channels": 1,
         "paste_combo": "ctrl+shift+v",
         "send_enter": True,
         "scroll_send_enter": True,
@@ -1276,6 +1386,8 @@ def _field_defaults() -> dict:
         "grace": 0.15,
         "key_record": "pause",
         "key_send": "scrolllock",
+        "key_record_send": "",
+        "key_record_mode": "hold",
         "normalize": True,
         "prompt": "",
         "wakeword_enabled": False,
@@ -1285,6 +1397,7 @@ def _field_defaults() -> dict:
         "wakeword_silence_level": 500.0,
         "wakeword_sherpa_score": 1.0,
         "wakeword_sherpa_threshold": 0.25,
+        "kws_threads": 2,
         "wakeword_record": "copy it, take it, grab it, catch it",
         "wakeword_send": "push it, ship it, send it, drop it",
         "wakeword_paste": "paste it, insert it, stick it",
