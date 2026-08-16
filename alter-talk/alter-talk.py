@@ -26,6 +26,7 @@ import argparse
 import fcntl
 import json
 import os
+import queue
 import re
 import select
 import shutil
@@ -79,7 +80,8 @@ both_send_enter = true         # both keys held: Enter after paste
 
 # Both-keys detection window (seconds): Scroll Lock pressed this long before
 # Pause is still treated as "both held".
-grace = 0.15
+grace = 0.5             # seconds; Scroll Lock pressed this long before
+                        # Pause is still treated as "both held"
 
 # Dictation normalization: "тильда слэш точка конфиг" -> "~/.config"
 normalize = true
@@ -100,12 +102,23 @@ wakeword_enabled = false
 wakeword_model = "hey_jarvis"     # pretrained name or path to a .onnx
 wakeword_sensitivity = 0.5        # 0..1 detection threshold
 wakeword_cooldown = 2.0           # seconds between triggers
+wakeword_grace = 3.0              # keep recording through silence right after
+                                  # a trigger, so you have time to start speaking
 wakeword_max_record = 30.0        # cap for recording after a trigger
 wakeword_stop_silence = 1.5       # seconds of silence end the recording
 wakeword_action = "record"        # record (clipboard) | record_send (paste+Enter)
 wakeword_silence_level = 500      # RMS below this counts as silence (0..32768)
 wakeword_engine = "sherpa"        # sherpa (open-vocab phrases) | openwakeword
-wakeword_keywords = "alter capture:record, alter send:record_send"
+wakeword_sherpa_score = 1.0       # sherpa KWS: boost for matched keywords
+wakeword_sherpa_threshold = 0.25  # sherpa KWS: trigger bar (lower=easier)
+# Wake phrases per action, comma-separated alternatives (at least two words
+# each to avoid random triggers; edit with `alter-talk setup`):
+wakeword_record = "copy it, take it, grab it, catch it"  # record -> clipboard only
+wakeword_send = "push it, ship it, send it, drop it"     # record -> clipboard -> paste+Enter
+wakeword_paste = "paste it, insert it, stick it"         # paste clipboard + Enter
+# Raw phrase list override, used only when all three keys above are empty:
+# wakeword_keywords = "alter capture:record, alter send:record_send"
+wakeword_debug = false            # log the mic level every second
 """
 
 
@@ -168,6 +181,8 @@ WAKEWORD_SENSITIVITY = _cfg("wakeword_sensitivity",
                             "ALTER_TALK_WAKEWORD_SENSITIVITY", 0.5, float)
 WAKEWORD_COOLDOWN = _cfg("wakeword_cooldown", "ALTER_TALK_WAKEWORD_COOLDOWN",
                          2.0, float)
+WAKEWORD_GRACE = _cfg("wakeword_grace", "ALTER_TALK_WAKEWORD_GRACE",
+                      3.0, float)
 WAKEWORD_MAX_RECORD = _cfg("wakeword_max_record",
                            "ALTER_TALK_WAKEWORD_MAX_RECORD", 30.0, float)
 WAKEWORD_STOP_SILENCE = _cfg("wakeword_stop_silence",
@@ -178,8 +193,47 @@ WAKEWORD_SILENCE_LEVEL = _cfg("wakeword_silence_level",
                               "ALTER_TALK_WAKEWORD_SILENCE_LEVEL", 500, float)
 WAKEWORD_ENGINE = _cfg("wakeword_engine", "ALTER_TALK_WAKEWORD_ENGINE",
                        "sherpa")
-WAKEWORD_KEYWORDS = _cfg("wakeword_keywords", "ALTER_TALK_WAKEWORD_KEYWORDS",
-                         "alter capture:record, alter send:record_send")
+# Sherpa KWS firing knobs: score boosts matched keywords, threshold is the
+# bar they must clear (lower = easier to trigger, more false positives).
+WAKEWORD_SHERPA_SCORE = _cfg("wakeword_sherpa_score",
+                             "ALTER_TALK_WAKEWORD_SHERPA_SCORE", 1.0, float)
+WAKEWORD_SHERPA_THRESHOLD = _cfg("wakeword_sherpa_threshold",
+                                 "ALTER_TALK_WAKEWORD_SHERPA_THRESHOLD",
+                                 0.25, float)
+# Per-action wake words (edited with `alter-talk setup`) compose the KWS
+# phrase list; the raw wakeword_keywords key stays for hand-edited configs.
+_WAKE_WORD_ACTIONS = (
+    ("wakeword_record", "record"),
+    ("wakeword_send", "record_send"),
+    ("wakeword_paste", "paste"),
+)
+
+
+def _compose_keywords(cfg: dict) -> str | None:
+    """'wakeword_send: "ship it, send it"' ->
+    'ship it:record_send, send it:record_send, ...' (or None).
+    Commas or '|' separate alternative phrases for the same action."""
+    words = [str(cfg.get(k, "")).strip() for k, _ in _WAKE_WORD_ACTIONS]
+    if not any(words):
+        return None
+    out = []
+    for (k, action), w in zip(_WAKE_WORD_ACTIONS, words):
+        for variant in re.split(r"[|,]", w):
+            variant = variant.replace(":", " ").strip()
+            if variant:
+                out.append(f"{variant}:{action}")
+    return ", ".join(out)
+
+
+_env_kw = os.environ.get("ALTER_TALK_WAKEWORD_KEYWORDS")
+if _env_kw:
+    WAKEWORD_KEYWORDS = _env_kw
+else:
+    WAKEWORD_KEYWORDS = _compose_keywords(_CFG) or _cfg(
+        "wakeword_keywords", "ALTER_TALK_WAKEWORD_KEYWORDS",
+        "alter capture:record, alter send:record_send")
+WAKEWORD_DEBUG = _cfg("wakeword_debug", "ALTER_TALK_WAKEWORD_DEBUG",
+                      False, _as_bool)
 DRY_RUN = _cfg("dry_run", "ALTER_TALK_DRY_RUN", False, _as_bool)
 NORMALIZE = _cfg("normalize", "ALTER_TALK_NORMALIZE", True, _as_bool)
 PROMPT = _cfg("prompt", "ALTER_TALK_PROMPT", "")
@@ -256,10 +310,10 @@ _WAKE_MODELS_DIR = Path.home() / ".local/share/alter-talk/models"
 _WAKE_VENV = Path.home() / ".local/share/alter-talk-venv"
 _WAKE_SILENCE_RMS = WAKEWORD_SILENCE_LEVEL / 32768.0
 _SHERPA_MODEL_DIR = _WAKE_MODELS_DIR / \
-    "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
+    "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
 _SHERPA_KEYWORDS_FILE = _WAKE_MODELS_DIR / "sherpa-kws-keywords.txt"
 _SHERPA_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
-               "kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
+               "kws-models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
                ".tar.bz2")
 
 
@@ -305,10 +359,10 @@ def _ensure_wake_model(path: Path, name: str) -> bool:
 
 
 def _ensure_sherpa_model() -> bool:
-    needed = ["tokens.txt", "bpe.model",
-              "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
-              "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
-              "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"]
+    needed = ["tokens.txt", "en.phone",
+              "encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx",
+              "decoder-epoch-13-avg-2-chunk-16-left-64.onnx",
+              "joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx"]
     if all((_SHERPA_MODEL_DIR / f).is_file() for f in needed):
         return True
     _WAKE_MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -327,31 +381,60 @@ def _ensure_sherpa_model() -> bool:
 
 
 def _ensure_sherpa_keywords() -> bool:
-    """Tokenize the configured phrases into the KWS keywords file."""
-    if _SHERPA_KEYWORDS_FILE.is_file():
-        return True
+    """Tokenize the configured phrases into the KWS keywords file.
+
+    The generated file is cached across restarts, but regenerated whenever
+    the configured phrases change (so editing wake words takes effect).
+    text2token runs PER PHRASE: its multi-line mode misaligns lines when a
+    phrase is missing from the en.phone lexicon, so one bad word must not
+    corrupt the whole file — it is skipped and logged instead.
+    """
     tokens = _SHERPA_MODEL_DIR / "tokens.txt"
-    bpe = _SHERPA_MODEL_DIR / "bpe.model"
+    lexicon = _SHERPA_MODEL_DIR / "en.phone"
     raw = _WAKE_MODELS_DIR / "sherpa-kws-raw.txt"
-    lines = [f"{phrase.upper()} :1.5 #0.35" for phrase, _ in
-             _parse_keywords(WAKEWORD_KEYWORDS)]
-    raw.write_text("\n".join(lines) + "\n")
+    # zh-en model: phone+ppinyin keywords; the original phrase goes after
+    # '@' with spaces replaced by underscores (the spotter reports that
+    # form), so 'alter send' comes back as 'ALTER_SEND'.
+    lines = [f"{phrase.upper()} @{phrase.upper().replace(' ', '_')}"
+             for phrase, _ in _parse_keywords(WAKEWORD_KEYWORDS)]
+    raw_text = "\n".join(lines) + "\n"
+    if (_SHERPA_KEYWORDS_FILE.is_file() and raw.is_file()
+            and raw.read_text() == raw_text):
+        return True
+    raw.write_text(raw_text)
     cli = _WAKE_VENV / "bin" / "sherpa-onnx-cli"
+    outputs: list[str] = []
     try:
-        r = subprocess.run(
-            [str(cli), "text2token", str(raw), "--tokens", str(tokens),
-             "--tokens-type", "bpe", "--bpe-model", str(bpe),
-             str(_SHERPA_KEYWORDS_FILE)],
-            capture_output=True, timeout=60,
-        )
-        if r.returncode != 0:
-            _log(f"wakeword: text2token failed: "
-                 f"{r.stderr.decode(errors='replace')[-200:]}")
-            return False
-        return _SHERPA_KEYWORDS_FILE.is_file()
+        for i, line in enumerate(lines):
+            one_raw = _WAKE_MODELS_DIR / f"sherpa-kws-one-{i}.raw"
+            one_out = _WAKE_MODELS_DIR / f"sherpa-kws-one-{i}.txt"
+            try:
+                one_raw.write_text(line + "\n")
+                r = subprocess.run(
+                    [str(cli), "text2token", str(one_raw),
+                     "--tokens", str(tokens),
+                     "--tokens-type", "phone+ppinyin",
+                     "--lexicon", str(lexicon), str(one_out)],
+                    capture_output=True, timeout=60,
+                )
+                if r.returncode == 0 and one_out.is_file():
+                    tokenized = one_out.read_text().strip()
+                    if tokenized:
+                        outputs.append(tokenized)
+                        continue
+                _log(f"wakeword: keyword {line!r} not tokenized"
+                     f" (missing from en.phone lexicon?) — skipped")
+            finally:
+                one_raw.unlink(missing_ok=True)
+                one_out.unlink(missing_ok=True)
     except Exception as exc:
         _log(f"wakeword: text2token failed: {exc}")
         return False
+    if not outputs:
+        _log("wakeword: no keywords tokenized — listener off")
+        return False
+    _SHERPA_KEYWORDS_FILE.write_text("\n".join(outputs) + "\n")
+    return True
 
 
 class _SherpaKws:
@@ -362,16 +445,22 @@ class _SherpaKws:
         self.pairs = _parse_keywords(WAKEWORD_KEYWORDS)
         self.actions = {phrase.casefold(): action
                         for phrase, action in self.pairs}
+        # provider string "cpu:<config>" lets sherpa forward onnxruntime
+        # session config entries (e.g. allow_spinning=0 -> no idle CPU burn).
+        _ort_cfg = Path(__file__).resolve().parent / "ort-nospin.config"
+        _provider = f"cpu:{_ort_cfg}" if _ort_cfg.is_file() else "cpu"
         self.spotter = sherpa_onnx.KeywordSpotter(
             tokens=str(_SHERPA_MODEL_DIR / "tokens.txt"),
             encoder=str(_SHERPA_MODEL_DIR /
-                        "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"),
+                        "encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx"),
             decoder=str(_SHERPA_MODEL_DIR /
-                        "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"),
+                        "decoder-epoch-13-avg-2-chunk-16-left-64.onnx"),
             joiner=str(_SHERPA_MODEL_DIR /
-                       "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"),
+                       "joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx"),
             keywords_file=str(_SHERPA_KEYWORDS_FILE),
-            num_threads=2, provider="cpu",
+            num_threads=2, provider=_provider,
+            keywords_score=WAKEWORD_SHERPA_SCORE,
+            keywords_threshold=WAKEWORD_SHERPA_THRESHOLD,
         )
         self.stream = self.spotter.create_stream()
 
@@ -383,9 +472,13 @@ class _SherpaKws:
         result = self.spotter.get_result(self.stream)
         if result:
             self.spotter.reset_stream(self.stream)
-            return result.strip()
-        if not self.spotter.is_ready(self.stream):
-            self.spotter.reset_stream(self.stream)
+            # zh-en model reports the '@' original: underscores instead of
+            # spaces ("ALTER_SEND") — normalize back to the phrase form.
+            return result.strip().replace("_", " ")
+        # NOTE: no reset_stream() here! is_ready()==False just means all
+        # frames were consumed; resetting would wipe the decoder's keyword
+        # hypotheses every chunk (80 ms) so a phrase spanning ~1s could
+        # never accumulate enough score to trigger.
         return None
 
     def action_for(self, phrase: str) -> str:
@@ -418,7 +511,10 @@ class _OwwDetector:
 
 
 def _wake_listen(self, stop_event: threading.Event) -> None:
-    """Continuous listener: parec -> detector -> record until silence."""
+    """Continuous listener: pw-cat -> detector -> record until silence."""
+    # onnxruntime's intra-op threads busy-spin when idle (3 sessions =
+    # encoder/decoder/joiner = ~3 cores of pure spin). Make them sleep.
+    os.environ.setdefault("ORT_DISABLE_SPIN_WAIT", "1")
     # OpenWakeWord/sherpa-onnx live in the alter-talk venv; make them
     # importable from the system python the daemon runs under.
     try:
@@ -442,20 +538,22 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
         _log(f"wakeword: engine init failed: {exc}")
         return
 
-    cmd = ["parec", "--rate", "16000", "--channels", "1", "--format", "s16le"]
+    cmd = ["pw-cat", "--record", "--rate", "16000", "--channels", "1",
+           "--format", "s16", "--raw", "-"]
     if RECORD_TARGET:
-        cmd += ["--device", RECORD_TARGET]
+        cmd += ["--target", RECORD_TARGET]
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL)
     except OSError as exc:
-        _log(f"wakeword: parec failed: {exc}")
+        _log(f"wakeword: pw-cat failed: {exc}")
         return
     import atexit
     atexit.register(proc.terminate)
 
     last_trigger = 0.0
     silence_since: float | None = None
+    next_level_log = 0.0
     try:
         while not stop_event.is_set():
             raw = proc.stdout.read(2560)  # 1280 samples = 80 ms
@@ -465,22 +563,30 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
             now = time.monotonic()
             rms = float(np.sqrt(np.mean(audio ** 2)))
 
+            # Debug: mic level bar every second (see it "trying to catch").
+            if WAKEWORD_DEBUG and now >= next_level_log:
+                next_level_log = now + 1.0
+                bar = "▁▂▃▄▅▆▇█"[min(7, int(rms * 40))]
+                _log(f"wakeword: lvl {rms:.3f} {bar}")
+
             # While a wake-triggered recording is running: stop on silence
-            # or the max-record cap.
+            # or the max-record cap. Silence is ignored during the post-
+            # trigger grace period (user needs a beat to start dictating).
             if self.recording and self.wake_rec:
-                if rms < _WAKE_SILENCE_RMS:
+                in_grace = now - self.rec_t0 < WAKEWORD_GRACE
+                if rms < _WAKE_SILENCE_RMS and not in_grace:
                     if silence_since is None:
                         silence_since = now
                     elif now - silence_since >= WAKEWORD_STOP_SILENCE:
                         _log("wakeword: silence — finishing recording")
-                        self._finish_record()
+                        self._finish_record(from_wake=True)
                         self.wake_rec = False
                         silence_since = None
                 else:
                     silence_since = None
                 if now - self.rec_t0 > WAKEWORD_MAX_RECORD:
                     _log("wakeword: max record — finishing")
-                    self._finish_record()
+                    self._finish_record(from_wake=True)
                     self.wake_rec = False
                 continue
 
@@ -491,10 +597,19 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
                 last_trigger = now
                 action = detector.action_for(phrase)
                 _log(f"wakeword: DETECTED {phrase!r} -> {action}")
+                if action == "paste":
+                    _notify("alter-talk", f"Paste (wake word: {phrase})")
+                    self._inject_q.put(SCROLL_SEND_ENTER)
+                    continue
                 _notify("alter-talk", f"Wake word detected: {phrase}")
                 self.wake_rec = True
-                self.autosend = action == "record_send"
                 self._start_record()
+                # autosend is set AFTER _start_record: the latter resets
+                # autosend=False at the start of every recording, so setting
+                # it before was silently wiped (wake record_send never sent).
+                # Same order as the key path (_on_pause/_on_scrolllock).
+                self.autosend = action == "record_send" and self.recording
+                _log(f"wakeword: trigger autosend={self.autosend} wake_rec={self.wake_rec}")
                 silence_since = None
     except (OSError, ValueError):
         pass
@@ -879,6 +994,9 @@ class _Daemon:
         self.grace_deadline: float | None = None  # SL tap waiting for Pause
         self.pause_down = False
         self.wake_rec = False  # recording started by the wake word listener
+        # Key injections requested by the wake word thread. Executed by the
+        # main loop — the same context that performs key-driven injections.
+        self._inject_q: "queue.Queue[bool]" = queue.Queue()
 
     def _start_record(self) -> None:
         if self.recording:
@@ -904,7 +1022,7 @@ class _Daemon:
         _log(f"record start -> {wav}")
         _notify("alter-talk", "Recording... (hold Pause)")
 
-    def _finish_record(self) -> None:
+    def _finish_record(self, from_wake: bool = False) -> None:
         if not self.recording or self.rec_proc is None:
             return
         stop_recording(self.rec_proc)
@@ -912,6 +1030,7 @@ class _Daemon:
         duration = time.monotonic() - self.rec_t0
         autosend = self.autosend
         self.autosend = False
+        _log(f"finish: autosend={autosend} from_wake={from_wake} dur={duration:.1f}")
         cycle_lock = getattr(self, "_cycle_lock", None)
         self._cycle_lock = None
         wav = Path(self._tmp_dir) / "rec.wav"
@@ -949,12 +1068,17 @@ class _Daemon:
             preview = text if len(text) <= 100 else text[:100] + "…"
             _log(f"result: {preview!r}")
             if autosend:
-                try:
-                    send_keys(enter=BOTH_SEND_ENTER)
-                except Exception as exc:
-                    _write_state(state="error", text=str(exc)[:200])
-                    _notify("alter-talk", f"Copied, but not sent: {exc}")
-                    return
+                if from_wake:
+                    # Inject from the main loop, not this thread — the same
+                    # context that performs key-driven injections.
+                    self._inject_q.put(BOTH_SEND_ENTER)
+                else:
+                    try:
+                        send_keys(enter=BOTH_SEND_ENTER)
+                    except Exception as exc:
+                        _write_state(state="error", text=str(exc)[:200])
+                        _notify("alter-talk", f"Copied, but not sent: {exc}")
+                        return
                 _write_state(state="sent", text=preview)
                 _notify("alter-talk", f"Sent: {preview}")
             else:
@@ -1011,6 +1135,17 @@ class _Daemon:
             _notify("alter-talk", "Daemon: Pause/ScrollLock keys not found on evdev")
         while True:
             now = time.monotonic()
+            # Wake word thread requests injections via the queue; the main
+            # loop performs them — same thread as key-driven injections.
+            while True:
+                try:
+                    _enter = self._inject_q.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    send_keys(enter=_enter)
+                except Exception as exc:
+                    _notify("alter-talk", f"Failed to send: {exc}")
             # Grace expiry: no Pause followed the Scroll Lock tap -> send.
             if self.grace_deadline is not None and now >= self.grace_deadline:
                 self.grace_deadline = None
@@ -1155,7 +1290,12 @@ _SETUP_FIELDS = [
     ("wakeword_action",    "Wake word action (record/record_send)", str),
     ("wakeword_silence_level", "Wake word silence RMS level",    float),
     ("wakeword_engine",    "Wake word engine (sherpa/openwakeword)", str),
-    ("wakeword_keywords",  "Keywords (phrase:action, comma-sep)", str),
+    ("wakeword_sherpa_score", "Sherpa KWS score boost (sensitivity)", float),
+    ("wakeword_sherpa_threshold", "Sherpa KWS threshold (lower=easier)", float),
+    ("wakeword_record",    "Wake word: record (copy only)",        str),
+    ("wakeword_send",      "Wake word: record+send (paste+Enter)", str),
+    ("wakeword_paste",     "Wake word: paste (clipboard)",         str),
+    ("wakeword_debug",     "Wake word mic level log",             bool),
 ]
 
 
@@ -1183,7 +1323,12 @@ def _field_defaults() -> dict:
         "wakeword_action": "record",
         "wakeword_silence_level": 500.0,
         "wakeword_engine": "sherpa",
-        "wakeword_keywords": "alter capture:record, alter send:record_send",
+        "wakeword_sherpa_score": 1.0,
+        "wakeword_sherpa_threshold": 0.25,
+        "wakeword_record": "copy it, take it, grab it, catch it",
+        "wakeword_send": "push it, ship it, send it, drop it",
+        "wakeword_paste": "paste it, insert it, stick it",
+        "wakeword_debug": False,
     }
 
 
@@ -1215,6 +1360,9 @@ def _save_config_file(values: dict) -> None:
             lines.append(f"{key} = {'true' if v else 'false'}")
         else:
             lines.append(f"{key} = {v}")
+    composed = _compose_keywords(values)
+    if composed:
+        lines.append(f'wakeword_keywords = "{composed}"')
     lines.append("")
     DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     DEFAULT_CONFIG_PATH.write_text("\n".join(lines))
@@ -1286,10 +1434,22 @@ Hyprland:
 """
 
 
+def _setup_prefill(values: dict) -> None:
+    """Old configs only have wakeword_keywords; show the first live phrase
+    per action in the new per-action word fields."""
+    for key, action in _WAKE_WORD_ACTIONS:
+        if key not in _CFG:
+            for phrase, act in _parse_keywords(WAKEWORD_KEYWORDS):
+                if act == action:
+                    values[key] = phrase
+                    break
+
+
 def _setup_main() -> int:
     """Interactive CLI menu (no curses — inherits the terminal theme)."""
     values = _field_defaults()
     values.update(_CFG)
+    _setup_prefill(values)
     message = ""
     while True:
         print("\n" + "─" * 60)
