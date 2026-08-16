@@ -260,6 +260,9 @@ the container stops after `WHISPER_IDLE_SECONDS` (default 300) of no requests.
 
 ## License
 
-shipboard is **source-available, non-commercial**: you may freely use, modify,
-and distribute it for non-commercial purposes. **Commercial use requires a
-paid license** from the author — see [LICENSE](LICENSE) for the full terms.
+shipboard is licensed under the **PolyForm Noncommercial License 1.0.0**:
+free for any noncommercial purpose — personal use, research, education,
+hobby projects, noncommercial organizations. **Commercial use requires a
+separate paid license from the author** — contact
+[nicklin11](https://github.com/nicklin11) for terms. See
+[LICENSE](LICENSE) for the full text.
