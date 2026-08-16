@@ -72,9 +72,11 @@ whisper_container = "whisper-local"
 max_hold = 60          # seconds; force-finish a stuck recording
 min_recording = 0.5    # seconds; shorter recordings are discarded
 
-# Send mode
+# Send mode (Scroll Lock / both keys)
 paste_combo = "ctrl+shift+v"   # injected as a modifier combo (layout-proof)
 send_enter = true              # global default: also press Enter after pasting
+scroll_send_enter = true       # Scroll Lock tap: Enter after paste
+both_send_enter = true         # both keys held: Enter after paste
 
 # Both-keys detection window (seconds): Scroll Lock pressed this long before
 # Pause is still treated as "both held".
@@ -164,6 +166,12 @@ DAEMON_LOCK_PATH = Path(_cfg("daemon_lock_path", "SHIPBOARD_DAEMON_LOCK",
 PASTE_COMBO = _cfg("paste_combo", "SHIPBOARD_PASTE_COMBO",
                    "ctrl+shift+v", str.lower)
 SEND_ENTER = _cfg("send_enter", "SHIPBOARD_SEND_ENTER", True, _as_bool)
+# Per-trigger "Enter after paste" (fall back to the global send_enter):
+# Scroll Lock tap / wake word "paste" vs record+send paths differ on purpose.
+SCROLL_SEND_ENTER = _cfg("scroll_send_enter", "SHIPBOARD_SCROLL_SEND_ENTER",
+                         SEND_ENTER, _as_bool)
+BOTH_SEND_ENTER = _cfg("both_send_enter", "SHIPBOARD_BOTH_SEND_ENTER",
+                       SEND_ENTER, _as_bool)
 # Wake word listener (engine WIP — config schema is ready)
 WAKEWORD_ENABLED = _cfg("wakeword_enabled", "SHIPBOARD_WAKEWORD_ENABLED",
                         False, _as_bool)
@@ -588,7 +596,7 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
                 _log(f"wakeword: DETECTED {phrase!r} -> {action}")
                 if action == "paste":
                     _notify("shipboard", f"Paste (wake word: {phrase})")
-                    self._inject_q.put(SEND_ENTER)
+                    self._inject_q.put(SCROLL_SEND_ENTER)
                     continue
                 _notify("shipboard", f"Wake word detected: {phrase}")
                 self.wake_rec = True
@@ -961,7 +969,7 @@ def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
             return 1
         if autosend:
             try:
-                send_keys()
+                send_keys(enter=BOTH_SEND_ENTER)
             except Exception as exc:
                 _notify("shipboard", f"Copied, but not sent: {exc}")
                 return 1
@@ -1052,10 +1060,10 @@ class _Daemon:
                 if from_wake:
                     # Inject from the main loop, not this thread — the same
                     # context that performs key-driven injections.
-                    self._inject_q.put(SEND_ENTER)
+                    self._inject_q.put(BOTH_SEND_ENTER)
                 else:
                     try:
-                        send_keys()
+                        send_keys(enter=BOTH_SEND_ENTER)
                     except Exception as exc:
                         _write_state(state="error", text=str(exc)[:200])
                         _notify("shipboard", f"Copied, but not sent: {exc}")
@@ -1131,7 +1139,7 @@ class _Daemon:
             if self.grace_deadline is not None and now >= self.grace_deadline:
                 self.grace_deadline = None
                 try:
-                    send_keys()
+                    send_keys(enter=SCROLL_SEND_ENTER)
                 except Exception as exc:
                     _notify("shipboard", f"Failed to send: {exc}")
             # MAX_HOLD safety: force-finish a stuck recording.
@@ -1199,8 +1207,9 @@ def _status_main() -> int:
     print(f"stt:       {WHISPER_URL}")
     print("keys:      Pause = record->clipboard | Scroll Lock = paste+Enter |"
           " both = record->paste+Enter")
-    print(f"paste:     {PASTE_COMBO} | Enter: "
-          f"{'yes' if SEND_ENTER else 'no'}"
+    print(f"paste:     {PASTE_COMBO} | Scroll Lock Enter: "
+          f"{'yes' if SCROLL_SEND_ENTER else 'no'} | both Enter: "
+          f"{'yes' if BOTH_SEND_ENTER else 'no'}"
           f" | grace {GRACE}s | max hold {MAX_HOLD}s | min rec {MIN_RECORDING}s")
     print(f"normalize: {'on' if NORMALIZE else 'off'}")
     print(f"wakeword:  {'on (' + WAKEWORD_ENGINE + ')' if WAKEWORD_ENABLED else 'off'}")
@@ -1253,7 +1262,9 @@ _SETUP_FIELDS = [
     ("whisper_container",  "Docker container to wake",           str),
     ("record_target",      "Record source (default=system)",    str),
     ("paste_combo",        "Paste shortcut (uinput combo)",      str),
-    ("send_enter",         "Enter after paste",                   bool),
+    ("send_enter",         "Enter after paste (global default)", bool),
+    ("scroll_send_enter",  "Scroll Lock tap: Enter after paste", bool),
+    ("both_send_enter",    "Both keys: Enter after paste",       bool),
     ("max_hold",           "Max hold, seconds (stuck guard)",    float),
     ("min_recording",      "Min recording, seconds",             float),
     ("grace",              "Both-keys window, seconds",          float),
@@ -1284,6 +1295,8 @@ def _field_defaults() -> dict:
         "record_target": "default",
         "paste_combo": "ctrl+shift+v",
         "send_enter": True,
+        "scroll_send_enter": True,
+        "both_send_enter": True,
         "max_hold": 60.0,
         "min_recording": 0.5,
         "grace": 0.15,
@@ -1518,7 +1531,7 @@ def _send_main() -> int:
         _notify("shipboard", "Recording in progress — skipping paste")
         return 0
     try:
-        send_keys()
+        send_keys(enter=SCROLL_SEND_ENTER)
     except Exception as exc:
         _notify("shipboard", f"Failed to send: {exc}")
         return 1
