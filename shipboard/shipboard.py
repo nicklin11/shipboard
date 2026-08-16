@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""alter-talk: voice daemon for Pause / Scroll Lock — record, copy, send.
+"""shipboard: voice daemon for Pause / Scroll Lock — record, copy, send.
 
 Three modes:
   * Pause held ......... record -> whisper -> wl-copy (clipboard only)
@@ -9,7 +9,7 @@ Three modes:
 
 WM-agnostic: the daemon watches evdev directly, so no compositor keybinds
 are needed (and none should exist — a WM bind would double-fire). Runs via
-compositor autostart (`spawn-at-startup "alter-talk"` / `exec-once`), guarded
+compositor autostart (`spawn-at-startup "shipboard"` / `exec-once`), guarded
 by a single-instance flock.
 
 Key injection uses a uinput virtual keyboard (python-evdev) — modifier combos
@@ -17,7 +17,7 @@ are layout-independent, so Cyrillic clipboard text pastes correctly in any
 layout. Falls back to wtype if uinput is unavailable.
 
 Requires: pw-record (PipeWire), python-evdev, wl-clipboard, whisper-local
-container (see ~/.config/whisper-local/docker-compose.yml + whisper-wake-proxy).
+container (see ~/.config/shipboard/docker-compose.yml + whisper-wake-proxy).
 """
 
 from __future__ import annotations
@@ -51,17 +51,17 @@ KEY_INSERT = 110      # KEY_INSERT
 KEY_ENTER = 28        # KEY_ENTER
 
 DEFAULT_CONFIG_PATH = Path(
-    "~/.config/whisper-local/alter-talk.toml"
+    "~/.config/shipboard/shipboard.toml"
 ).expanduser()
 STATE_PATH = Path(
     os.environ.get(
-        "ALTER_TALK_STATE", "~/.local/state/alter-talk/state.json"
+        "SHIPBOARD_STATE", "~/.local/state/shipboard/state.json"
     )
 ).expanduser()
 
 DEFAULT_CONFIG_TEXT = """\
-# alter-talk configuration
-# Precedence: defaults < this file < environment variables (ALTER_TALK_*).
+# shipboard configuration
+# Precedence: defaults < this file < environment variables (SHIPBOARD_*).
 
 # Speech-to-text server (local wake proxy or a remote tailnet host)
 whisper_url = "http://127.0.0.1:10300/inference"
@@ -109,7 +109,7 @@ wakeword_engine = "sherpa"        # sherpa (open-vocab phrases) | openwakeword
 wakeword_sherpa_score = 1.0       # sherpa KWS: boost for matched keywords
 wakeword_sherpa_threshold = 0.25  # sherpa KWS: trigger bar (lower=easier)
 # Wake phrases per action, comma-separated alternatives (at least two words
-# each to avoid random triggers; edit with `alter-talk setup`):
+# each to avoid random triggers; edit with `shipboard setup`):
 wakeword_record = "copy it, take it, grab it, catch it"  # record -> clipboard only
 wakeword_send = "push it, ship it, send it, drop it"     # record -> clipboard -> paste+Enter
 wakeword_paste = "paste it, insert it, stick it"         # paste clipboard + Enter
@@ -153,44 +153,44 @@ WHISPER_CONTAINER = _cfg("whisper_container", "WHISPER_CONTAINER",
                          "whisper-local")
 IDLE_MARKER = Path(_cfg("idle_marker", "WHISPER_IDLE_MARKER",
                         "/tmp/whisper-local-last-use"))
-MAX_HOLD = _cfg("max_hold", "ALTER_TALK_MAX_HOLD", 60.0, float)
-MIN_RECORDING = _cfg("min_recording", "ALTER_TALK_MIN_RECORDING", 0.5, float)
-GRACE = _cfg("grace", "ALTER_TALK_GRACE", 0.15, float)  # SL->Pause window
+MAX_HOLD = _cfg("max_hold", "SHIPBOARD_MAX_HOLD", 60.0, float)
+MIN_RECORDING = _cfg("min_recording", "SHIPBOARD_MIN_RECORDING", 0.5, float)
+GRACE = _cfg("grace", "SHIPBOARD_GRACE", 0.15, float)  # SL->Pause window
 RATE = 16000
 CHANNELS = 1
-LOCK_PATH = Path(_cfg("lock_path", "ALTER_TALK_LOCK", "/tmp/alter-talk.lock"))
-DAEMON_LOCK_PATH = Path(_cfg("daemon_lock_path", "ALTER_TALK_DAEMON_LOCK",
-                             "/tmp/alter-talk.daemon.lock"))
-PASTE_COMBO = _cfg("paste_combo", "ALTER_TALK_PASTE_COMBO",
+LOCK_PATH = Path(_cfg("lock_path", "SHIPBOARD_LOCK", "/tmp/shipboard.lock"))
+DAEMON_LOCK_PATH = Path(_cfg("daemon_lock_path", "SHIPBOARD_DAEMON_LOCK",
+                             "/tmp/shipboard.daemon.lock"))
+PASTE_COMBO = _cfg("paste_combo", "SHIPBOARD_PASTE_COMBO",
                    "ctrl+shift+v", str.lower)
-SEND_ENTER = _cfg("send_enter", "ALTER_TALK_SEND_ENTER", True, _as_bool)
+SEND_ENTER = _cfg("send_enter", "SHIPBOARD_SEND_ENTER", True, _as_bool)
 # Wake word listener (engine WIP — config schema is ready)
-WAKEWORD_ENABLED = _cfg("wakeword_enabled", "ALTER_TALK_WAKEWORD_ENABLED",
+WAKEWORD_ENABLED = _cfg("wakeword_enabled", "SHIPBOARD_WAKEWORD_ENABLED",
                         False, _as_bool)
-WAKEWORD_MODEL = _cfg("wakeword_model", "ALTER_TALK_WAKEWORD_MODEL",
+WAKEWORD_MODEL = _cfg("wakeword_model", "SHIPBOARD_WAKEWORD_MODEL",
                       "hey_jarvis")
 WAKEWORD_SENSITIVITY = _cfg("wakeword_sensitivity",
-                            "ALTER_TALK_WAKEWORD_SENSITIVITY", 0.5, float)
-WAKEWORD_COOLDOWN = _cfg("wakeword_cooldown", "ALTER_TALK_WAKEWORD_COOLDOWN",
+                            "SHIPBOARD_WAKEWORD_SENSITIVITY", 0.5, float)
+WAKEWORD_COOLDOWN = _cfg("wakeword_cooldown", "SHIPBOARD_WAKEWORD_COOLDOWN",
                          2.0, float)
-WAKEWORD_GRACE = _cfg("wakeword_grace", "ALTER_TALK_WAKEWORD_GRACE",
+WAKEWORD_GRACE = _cfg("wakeword_grace", "SHIPBOARD_WAKEWORD_GRACE",
                       3.0, float)
 WAKEWORD_STOP_SILENCE = _cfg("wakeword_stop_silence",
-                             "ALTER_TALK_WAKEWORD_STOP_SILENCE", 1.5, float)
-WAKEWORD_ACTION = _cfg("wakeword_action", "ALTER_TALK_WAKEWORD_ACTION",
+                             "SHIPBOARD_WAKEWORD_STOP_SILENCE", 1.5, float)
+WAKEWORD_ACTION = _cfg("wakeword_action", "SHIPBOARD_WAKEWORD_ACTION",
                        "record")
 WAKEWORD_SILENCE_LEVEL = _cfg("wakeword_silence_level",
-                              "ALTER_TALK_WAKEWORD_SILENCE_LEVEL", 500, float)
-WAKEWORD_ENGINE = _cfg("wakeword_engine", "ALTER_TALK_WAKEWORD_ENGINE",
+                              "SHIPBOARD_WAKEWORD_SILENCE_LEVEL", 500, float)
+WAKEWORD_ENGINE = _cfg("wakeword_engine", "SHIPBOARD_WAKEWORD_ENGINE",
                        "sherpa")
 # Sherpa KWS firing knobs: score boosts matched keywords, threshold is the
 # bar they must clear (lower = easier to trigger, more false positives).
 WAKEWORD_SHERPA_SCORE = _cfg("wakeword_sherpa_score",
-                             "ALTER_TALK_WAKEWORD_SHERPA_SCORE", 1.0, float)
+                             "SHIPBOARD_WAKEWORD_SHERPA_SCORE", 1.0, float)
 WAKEWORD_SHERPA_THRESHOLD = _cfg("wakeword_sherpa_threshold",
-                                 "ALTER_TALK_WAKEWORD_SHERPA_THRESHOLD",
+                                 "SHIPBOARD_WAKEWORD_SHERPA_THRESHOLD",
                                  0.25, float)
-# Per-action wake words (edited with `alter-talk setup`) compose the KWS
+# Per-action wake words (edited with `shipboard setup`) compose the KWS
 # phrase list; the raw wakeword_keywords key stays for hand-edited configs.
 _WAKE_WORD_ACTIONS = (
     ("wakeword_record", "record"),
@@ -215,23 +215,23 @@ def _compose_keywords(cfg: dict) -> str | None:
     return ", ".join(out)
 
 
-_env_kw = os.environ.get("ALTER_TALK_WAKEWORD_KEYWORDS")
+_env_kw = os.environ.get("SHIPBOARD_WAKEWORD_KEYWORDS")
 if _env_kw:
     WAKEWORD_KEYWORDS = _env_kw
 else:
     WAKEWORD_KEYWORDS = _compose_keywords(_CFG) or _cfg(
-        "wakeword_keywords", "ALTER_TALK_WAKEWORD_KEYWORDS",
+        "wakeword_keywords", "SHIPBOARD_WAKEWORD_KEYWORDS",
         "alter capture:record, alter send:record_send")
-WAKEWORD_DEBUG = _cfg("wakeword_debug", "ALTER_TALK_WAKEWORD_DEBUG",
+WAKEWORD_DEBUG = _cfg("wakeword_debug", "SHIPBOARD_WAKEWORD_DEBUG",
                       False, _as_bool)
-DRY_RUN = _cfg("dry_run", "ALTER_TALK_DRY_RUN", False, _as_bool)
-NORMALIZE = _cfg("normalize", "ALTER_TALK_NORMALIZE", True, _as_bool)
-PROMPT = _cfg("prompt", "ALTER_TALK_PROMPT", "")
-_keep_audio_dir = _cfg("keep_audio_dir", "ALTER_TALK_KEEP_AUDIO_DIR", "")
+DRY_RUN = _cfg("dry_run", "SHIPBOARD_DRY_RUN", False, _as_bool)
+NORMALIZE = _cfg("normalize", "SHIPBOARD_NORMALIZE", True, _as_bool)
+PROMPT = _cfg("prompt", "SHIPBOARD_PROMPT", "")
+_keep_audio_dir = _cfg("keep_audio_dir", "SHIPBOARD_KEEP_AUDIO_DIR", "")
 KEEP_AUDIO_DIR = Path(_keep_audio_dir).expanduser() if _keep_audio_dir else None
 # "default"/"auto"/"" = record from the system default source (PipeWire
 # picks it, e.g. the EasyEffects chain); any other value = explicit device.
-RECORD_TARGET = _cfg("record_target", "ALTER_TALK_RECORD_TARGET", "")
+RECORD_TARGET = _cfg("record_target", "SHIPBOARD_RECORD_TARGET", "")
 if RECORD_TARGET.lower() in ("default", "auto", "system"):
     RECORD_TARGET = ""
 
@@ -249,7 +249,7 @@ _COMBO_KEYS = {
 def _notify(title: str, msg: str) -> None:
     try:
         subprocess.run(
-            ["notify-send", "-a", "alter-talk", title, msg],
+            ["notify-send", "-a", "shipboard", title, msg],
             timeout=5,
             capture_output=True,
         )
@@ -295,8 +295,8 @@ def stop_recording(proc: subprocess.Popen) -> None:
 # --------------------------------------------------------------------------
 # Wake word listener (sherpa-onnx KWS, streaming via parec)
 # --------------------------------------------------------------------------
-_WAKE_MODELS_DIR = Path.home() / ".local/share/alter-talk/models"
-_WAKE_VENV = Path.home() / ".local/share/alter-talk-venv"
+_WAKE_MODELS_DIR = Path.home() / ".local/share/shipboard/models"
+_WAKE_VENV = Path.home() / ".local/share/shipboard-venv"
 _WAKE_SILENCE_RMS = WAKEWORD_SILENCE_LEVEL / 32768.0
 _SHERPA_MODEL_DIR = _WAKE_MODELS_DIR / \
     "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
@@ -504,7 +504,7 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
     # onnxruntime's intra-op threads busy-spin when idle (3 sessions =
     # encoder/decoder/joiner = ~3 cores of pure spin). Make them sleep.
     os.environ.setdefault("ORT_DISABLE_SPIN_WAIT", "1")
-    # OpenWakeWord/sherpa-onnx live in the alter-talk venv; make them
+    # OpenWakeWord/sherpa-onnx live in the shipboard venv; make them
     # importable from the system python the daemon runs under.
     try:
         for sp in (_WAKE_VENV / "lib").glob("python*/site-packages"):
@@ -522,7 +522,7 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
         else:
             detector = _OwwDetector()
         _log(f"wakeword: listening ({detector.describe()})")
-        _notify("alter-talk", f"Wake word on: {detector.describe()}")
+        _notify("shipboard", f"Wake word on: {detector.describe()}")
     except Exception as exc:
         _log(f"wakeword: engine init failed: {exc}")
         return
@@ -587,10 +587,10 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
                 action = detector.action_for(phrase)
                 _log(f"wakeword: DETECTED {phrase!r} -> {action}")
                 if action == "paste":
-                    _notify("alter-talk", f"Paste (wake word: {phrase})")
+                    _notify("shipboard", f"Paste (wake word: {phrase})")
                     self._inject_q.put(SEND_ENTER)
                     continue
-                _notify("alter-talk", f"Wake word detected: {phrase}")
+                _notify("shipboard", f"Wake word detected: {phrase}")
                 self.wake_rec = True
                 self._start_record()
                 # autosend is set AFTER _start_record: the latter resets
@@ -614,7 +614,7 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
 # Whisper.cpp (docker) transcription
 # --------------------------------------------------------------------------
 def _multipart_body(fields: dict[str, str], wav_path: Path) -> tuple[bytes, str]:
-    boundary = f"----alter-talk-{uuid.uuid4().hex}"
+    boundary = f"----shipboard-{uuid.uuid4().hex}"
     chunks: list[bytes] = []
     for name, value in fields.items():
         chunks.extend(
@@ -829,8 +829,8 @@ def _inject_uinput(combo: str, enter: bool) -> None:
     keys = set(mods) | {key} | ({KEY_ENTER} if enter else set())
     ui = UInput(
         {ecodes.EV_KEY: list(keys)},
-        name="alter-talk",
-        phys="alter-talk",
+        name="shipboard",
+        phys="shipboard",
     )
     try:
         delay = 0.03
@@ -909,11 +909,11 @@ def _transcribe_copy(wav: Path) -> tuple[str, str]:
 
 def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
     """Record -> transcribe -> copy; auto-send if autosend. Returns exit code."""
-    tmp_dir = Path(tempfile.mkdtemp(prefix="alter-talk-"))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="shipboard-"))
     try:
         wav_path = tmp_dir / "rec.wav"
         _notify(
-            "alter-talk",
+            "shipboard",
             "Recording... (hold Pause)"
             + (" — release: will paste and send" if autosend else ""),
         )
@@ -948,26 +948,26 @@ def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
         stop_recording(proc)
         duration = time.monotonic() - t0
         if duration < MIN_RECORDING:
-            _notify("alter-talk", "Recording too short")
+            _notify("shipboard", "Recording too short")
             return 0
         if not wav_path.is_file() or wav_path.stat().st_size == 0:
-            _notify("alter-talk", "Error: empty recording file")
+            _notify("shipboard", "Error: empty recording file")
             return 1
         try:
             text, preview = _transcribe_copy(wav_path)
         except RuntimeError as exc:
-            print(f"alter-talk: {exc}", file=sys.stderr)
-            _notify("alter-talk", str(exc))
+            print(f"shipboard: {exc}", file=sys.stderr)
+            _notify("shipboard", str(exc))
             return 1
         if autosend:
             try:
                 send_keys()
             except Exception as exc:
-                _notify("alter-talk", f"Copied, but not sent: {exc}")
+                _notify("shipboard", f"Copied, but not sent: {exc}")
                 return 1
-            _notify("alter-talk", f"Sent: {preview}")
+            _notify("shipboard", f"Sent: {preview}")
         else:
-            _notify("alter-talk", f"Copied: {preview}")
+            _notify("shipboard", f"Copied: {preview}")
         return 0
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1003,7 +1003,7 @@ class _Daemon:
             self._cycle_lock.close()
             self._cycle_lock = None
             return
-        tmp_dir = Path(tempfile.mkdtemp(prefix="alter-talk-"))
+        tmp_dir = Path(tempfile.mkdtemp(prefix="shipboard-"))
         wav = tmp_dir / "rec.wav"
         self.rec_proc = start_recording(wav)
         self.recording = True
@@ -1011,7 +1011,7 @@ class _Daemon:
         self._tmp_dir = tmp_dir
         _write_state(state="recording")
         _log(f"record start -> {wav}")
-        _notify("alter-talk", "Recording... (hold Pause)")
+        _notify("shipboard", "Recording... (hold Pause)")
 
     def _finish_record(self, from_wake: bool = False) -> None:
         if not self.recording or self.rec_proc is None:
@@ -1027,15 +1027,15 @@ class _Daemon:
         wav = Path(self._tmp_dir) / "rec.wav"
         try:
             if duration < MIN_RECORDING:
-                _notify("alter-talk", "Recording too short")
+                _notify("shipboard", "Recording too short")
                 return
             if not wav.is_file() or wav.stat().st_size == 0:
-                _notify("alter-talk", "Error: empty recording file")
+                _notify("shipboard", "Error: empty recording file")
                 return
             if KEEP_AUDIO_DIR is not None:
                 KEEP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
                 shutil.copy(wav, KEEP_AUDIO_DIR / f"rec-{int(time.time())}.wav")
-            _notify("alter-talk", "Processing speech...")
+            _notify("shipboard", "Processing speech...")
             _write_state(state="processing")
             try:
                 text, preview = _transcribe_copy(wav)
@@ -1046,7 +1046,7 @@ class _Daemon:
                     state="idle" if str(exc) == "Nothing recognized" else "error",
                     text=str(exc)[:200],
                 )
-                _notify("alter-talk", str(exc))
+                _notify("shipboard", str(exc))
                 return
             if autosend:
                 if from_wake:
@@ -1058,13 +1058,13 @@ class _Daemon:
                         send_keys()
                     except Exception as exc:
                         _write_state(state="error", text=str(exc)[:200])
-                        _notify("alter-talk", f"Copied, but not sent: {exc}")
+                        _notify("shipboard", f"Copied, but not sent: {exc}")
                         return
                 _write_state(state="sent", text=preview)
-                _notify("alter-talk", f"Sent: {preview}")
+                _notify("shipboard", f"Sent: {preview}")
             else:
                 _write_state(state="copied", text=preview)
-                _notify("alter-talk", f"Copied: {preview}")
+                _notify("shipboard", f"Copied: {preview}")
         finally:
             try:
                 shutil.rmtree(self._tmp_dir, ignore_errors=True)
@@ -1113,7 +1113,7 @@ class _Daemon:
             ).start()
         devices = _watch_devices()
         if not devices:
-            _notify("alter-talk", "Daemon: Pause/ScrollLock keys not found on evdev")
+            _notify("shipboard", "Daemon: Pause/ScrollLock keys not found on evdev")
         while True:
             now = time.monotonic()
             # Wake word thread requests injections via the queue; the main
@@ -1126,14 +1126,14 @@ class _Daemon:
                 try:
                     send_keys(enter=_enter)
                 except Exception as exc:
-                    _notify("alter-talk", f"Failed to send: {exc}")
+                    _notify("shipboard", f"Failed to send: {exc}")
             # Grace expiry: no Pause followed the Scroll Lock tap -> send.
             if self.grace_deadline is not None and now >= self.grace_deadline:
                 self.grace_deadline = None
                 try:
                     send_keys()
                 except Exception as exc:
-                    _notify("alter-talk", f"Failed to send: {exc}")
+                    _notify("shipboard", f"Failed to send: {exc}")
             # MAX_HOLD safety: force-finish a stuck recording.
             if self.recording and now - self.rec_t0 > MAX_HOLD:
                 self._finish_record()
@@ -1322,7 +1322,7 @@ def _parse_value(raw: str, conv) -> object:
 
 def _save_config_file(values: dict) -> None:
     lines = [
-        "# alter-talk configuration (edited with 'alter-talk setup')",
+        "# shipboard configuration (edited with 'shipboard setup')",
         "# Precedence: defaults < this file < environment variables.",
         "",
     ]
@@ -1352,7 +1352,7 @@ def _health_check(url: str) -> str:
 
 def _daemon_pids() -> list[int]:
     # Match only the daemon python process (not bash wrappers / other CLIs).
-    out = subprocess.run(["pgrep", "-f", "python3 .*alter-talk"],
+    out = subprocess.run(["pgrep", "-f", "python3 .*shipboard"],
                          capture_output=True, text=True)
     pids = []
     for pid in out.stdout.split():
@@ -1369,7 +1369,7 @@ def _daemon_pids() -> list[int]:
 def _restart_daemon() -> str:
     try:
         r = subprocess.run(
-            ["systemctl", "--user", "restart", "alter-talk"],
+            ["systemctl", "--user", "restart", "shipboard"],
             capture_output=True, timeout=15,
         )
         if r.returncode == 0:
@@ -1397,12 +1397,12 @@ Bind the keys to a no-op in your compositor so they don't leak into apps
 niri (~/.config/niri/conf/binds.kdl):
     Pause repeat=false { spawn "true"; }
     Scroll_Lock repeat=false { spawn "true"; }
-  autostart:  spawn-at-startup "alter-talk"
+  autostart:  spawn-at-startup "shipboard"
 
 Hyprland:
     bind = , Pause, exec, true
     bind = , Scroll_Lock, exec, true
-  autostart:  exec-once = alter-talk
+  autostart:  exec-once = shipboard
 """
 
 
@@ -1425,7 +1425,7 @@ def _setup_main() -> int:
     message = ""
     while True:
         print("\n" + "─" * 60)
-        print(f" alter-talk setup — {DEFAULT_CONFIG_PATH}")
+        print(f" shipboard setup — {DEFAULT_CONFIG_PATH}")
         print("─" * 60)
         for i, (key, label, conv) in enumerate(_SETUP_FIELDS, start=1):
             mark = "*" if key in _CFG else " "
@@ -1492,7 +1492,7 @@ def _daemon_main() -> int:
     try:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        print("alter-talk: daemon already running", file=sys.stderr)
+        print("shipboard: daemon already running", file=sys.stderr)
         return 0
     try:
         _Daemon().run()
@@ -1515,12 +1515,12 @@ def _send_main() -> int:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         lock_fh.close()
     except OSError:
-        _notify("alter-talk", "Recording in progress — skipping paste")
+        _notify("shipboard", "Recording in progress — skipping paste")
         return 0
     try:
         send_keys()
     except Exception as exc:
-        _notify("alter-talk", f"Failed to send: {exc}")
+        _notify("shipboard", f"Failed to send: {exc}")
         return 1
     return 0
 
@@ -1535,7 +1535,7 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(
         description=(
-            "alter-talk: voice daemon (Pause/Scroll Lock) + helpers.\n"
+            "shipboard: voice daemon (Pause/Scroll Lock) + helpers.\n"
             "Subcommands: status (state), config (TOML editor), "
             "setup (interactive TUI), --send (paste+Enter)."
         ),
@@ -1575,18 +1575,18 @@ def main() -> int:
                 if not wav.is_file():
                     print(f"File not found: {wav}", file=sys.stderr)
                     return 1
-                _notify("alter-talk", "Processing speech...")
+                _notify("shipboard", "Processing speech...")
                 try:
                     text = transcribe(wav)
                 except Exception as exc:
-                    _notify("alter-talk", f"Recognition error: {exc}")
+                    _notify("shipboard", f"Recognition error: {exc}")
                     return 1
                 text = normalize_text(text)
                 if args.no_copy:
                     print(text)
                 else:
                     copy_to_clipboard(text)
-                    _notify("alter-talk", f"Copied: {text[:100]}")
+                    _notify("shipboard", f"Copied: {text[:100]}")
                 return 0
             return run_record_cycle(autosend=False, seconds=args.seconds)
         finally:

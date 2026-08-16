@@ -1,7 +1,7 @@
-# alter-talk configuration
+# shipboard configuration
 # Precedence: defaults < this file < environment variables (ALTER_TALK_*).
-# Generate your own copy with: alter-talk config
-# (default location: ~/.config/whisper-local/alter-talk.toml)
+# Generate your own copy with: shipboard config
+# (default location: ~/.config/shipboard/shipboard.toml)
 
 # Speech-to-text server (local wake proxy or a remote tailnet host)
 whisper_url = "http://127.0.0.1:10300/inference"
@@ -32,7 +32,7 @@ normalize = true
 # record_target = "alsa_input.pci-0000_00_1f.3.analog-stereo"
 
 # Wake word listener (sherpa-onnx KWS by default; venv at
-# ~/.local/share/alter-talk-venv, model auto-downloads on first run).
+# ~/.local/share/shipboard-venv, model auto-downloads on first run).
 # wakeword_enabled = false
 # wakeword_engine = "sherpa"      # sherpa (open-vocab phrases) | openwakeword
 # wakeword_keywords = "alter capture:record, alter send:record_send"

@@ -1,9 +1,9 @@
-# alter-talk
+# shipboard
 
 Voice input daemon for agent TUIs: hold-to-talk transcription with a
 paste-and-send mode, wired straight into your keyboard via evdev.
 
-Part of [whisper-local](../README.md). Requires the local whisper.cpp server
+Part of [shipboard](../README.md). Requires the local whisper.cpp server
 (see the parent compose file and wake proxy).
 
 ## How it works
@@ -35,12 +35,12 @@ supported. Disable with `ALTER_TALK_NORMALIZE=0`.
 
 ```bash
 # as a systemd user service
-install -m 0644 alter-talk.service ~/.config/systemd/user/
+install -m 0644 shipboard.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now alter-talk
+systemctl --user enable --now shipboard
 
 # or from a compositor (niri / Hyprland autostart):
-#   spawn-at-startup "alter-talk"   /   exec-once = alter-talk
+#   spawn-at-startup "shipboard"   /   exec-once = shipboard
 ```
 
 A single-instance flock guards against double starts.
@@ -54,27 +54,27 @@ keys so they never reach the focused app (kitty encodes unbound keys as
 ## Configuration
 
 Settings come from, in order of precedence: built-in defaults < the TOML
-config file (<code>~/.config/whisper-local/alter-talk.toml</code>) <
+config file (<code>~/.config/shipboard/shipboard.toml</code>) <
 environment variables (<code>ALTER_TALK_*</code>).
 
 ```bash
-alter-talk setup   # TUI: edit settings, test STT, compositor snippets,
+shipboard setup   # TUI: edit settings, test STT, compositor snippets,
                     # restart the daemon (stdlib curses, no dependencies)
-alter-talk config   # generate the config file (if missing) and show the
+shipboard config   # generate the config file (if missing) and show the
                     # effective settings
-alter-talk status   # daemon state, keys, last transcript
+shipboard status   # daemon state, keys, last transcript
 ```
 
-See <code>alter-talk.toml.example</code> for the documented template. Point
+See <code>shipboard.toml.example</code> for the documented template. Point
 <code>whisper_url</code> at a tailnet host to transcribe through a remote
 machine's GPU (see the parent README's Remote use section).
 
 ## Manual / debug
 
 ```bash
-alter-talk --send                 # one-shot paste + Enter (refuses while recording)
-alter-talk --file /tmp/x.wav      # transcribe an existing file
-ALTER_TALK_DRY_RUN=1 alter-talk --send   # print instead of injecting
+shipboard --send                 # one-shot paste + Enter (refuses while recording)
+shipboard --file /tmp/x.wav      # transcribe an existing file
+ALTER_TALK_DRY_RUN=1 shipboard --send   # print instead of injecting
 ```
 
 ## Config

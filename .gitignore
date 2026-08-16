@@ -2,4 +2,4 @@ __pycache__/
 *.pyc
 .env
 whisper-data/
-alter-talk.toml
+shipboard.toml
