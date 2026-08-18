@@ -789,6 +789,52 @@ def _watch_devices():
     return devices
 
 
+def _input_access_issue() -> str:
+    """Diagnose why key triggers aren't readable from /dev/input.
+
+    Empty string = access is fine (keys simply aren't mapped on any device).
+    Otherwise a short, actionable hint (e.g. user not in the `input` group),
+    so the otherwise-silent "keys not found" becomes debuggable.
+    """
+    import evdev
+    import glob
+    import grp
+    import os
+
+    # Scan ALL input nodes (glob, not evdev.list_devices, which only returns
+    # nodes this process can already open) so an unreadable keyboard is seen.
+    paths = sorted(glob.glob("/dev/input/event*"))
+    if not paths:
+        return ""  # no input devices at all
+    forbidden = False
+    for p in paths:
+        try:
+            dev = evdev.InputDevice(p)
+            try:
+                dev.close()
+            except Exception:
+                pass
+        except PermissionError:
+            forbidden = True
+            break
+        except OSError:
+            continue
+    if not forbidden:
+        return ""  # all devices openable; keys just not mapped on any
+    gname = "input"
+    try:
+        gid = os.stat("/dev/input/event0").st_gid
+        gname = grp.getgrgid(gid).gr_name
+    except Exception:
+        pass
+    mine = {grp.getgrgid(g).gr_name for g in os.getgroups()}
+    if gname in mine:
+        return (f"keys off: /dev/input unreadable despite being in group "
+                f"'{gname}' (session needs log out/in or a udev rule)")
+    return (f"keys off: not in group '{gname}' — run "
+            f"'sudo usermod -aG {gname} $USER' then log out/in")
+
+
 # --------------------------------------------------------------------------
 # Recording cycle (shared by daemon and one-shot modes)
 # --------------------------------------------------------------------------
@@ -1059,8 +1105,13 @@ class _Daemon:
         send_code = _key_code(KEY_SEND) if KEY_SEND else None
         rec_send_code = _key_code(KEY_RECORD_SEND) if KEY_RECORD_SEND else None
         if not devices and (rec_code, send_code, rec_send_code) != (None,) * 3:
-            _notify("shipboard",
-                    "Daemon: trigger keys not found on evdev (wake words still on)")
+            hint = _input_access_issue()
+            msg = "Daemon: trigger keys not found on evdev (wake words still on)"
+            if hint:
+                msg += f"\n{hint}"
+            _notify("shipboard", msg)
+            if hint:
+                print(f"shipboard: {hint}", file=sys.stderr)
         while True:
             now = time.monotonic()
             # Wake word thread requests injections via the queue; the main
