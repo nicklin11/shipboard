@@ -284,26 +284,39 @@ def _inject_uinput(combo: str, enter: bool) -> None:
     keys = _full_combo_keys()
     if len(parts) < 2 or parts[-1] not in keys:
         raise ValueError(f"unsupported combo: {combo!r}")
-    codes = []
+    mods = []
     for mod in parts[:-1]:
         name = _COMBO_MODS.get(mod)
         if name is None:
             raise ValueError(f"unknown modifier in combo: {mod!r}")
-        codes.append(ecodes.ecodes[name])
-    codes.append(ecodes.ecodes[keys[parts[-1]]])
-    if enter:
-        codes.append(ecodes.ecodes["KEY_ENTER"])
+        mods.append(ecodes.ecodes[name])
+    key = ecodes.ecodes[keys[parts[-1]]]
 
     with UInput() as ui:
         delay = 0.03
-        for code in codes:
+        # Paste combo (modifiers + key) held together only.
+        for code in mods:
             ui.write(ecodes.EV_KEY, code, 1)
             ui.syn()
+        ui.write(ecodes.EV_KEY, key, 1)
+        ui.syn()
         time.sleep(delay)
-        for code in reversed(codes):
+        # Release the whole combo BEFORE Enter, so Enter is a plain,
+        # unmodified key. Holding modifiers while pressing Enter makes the
+        # terminal encode a "modified Enter" (Kitty protocol CSI-u) which
+        # apps like the Hermes TUI render as literal text instead of acting on.
+        ui.write(ecodes.EV_KEY, key, 0)
+        ui.syn()
+        for code in mods:
             ui.write(ecodes.EV_KEY, code, 0)
             ui.syn()
-        time.sleep(delay)
+        if enter:
+            time.sleep(delay)
+            ui.write(ecodes.EV_KEY, ecodes.ecodes["KEY_ENTER"], 1)
+            ui.syn()
+            time.sleep(delay)
+            ui.write(ecodes.EV_KEY, ecodes.ecodes["KEY_ENTER"], 0)
+            ui.syn()
 
 
 def _inject_wtype(combo: str, enter: bool) -> None:
@@ -320,9 +333,12 @@ def _inject_wtype(combo: str, enter: bool) -> None:
             raise ValueError(f"unknown modifier in combo: {mod!r}")
         cmd += ["-M", mod]
     cmd.append(parts[-1])
-    if enter:
-        cmd += ["-m", parts[-1], "Return"]
     subprocess.run(cmd, timeout=5, capture_output=True)
+    # Send Enter as its own unmodified key (run separately so the combo
+    # modifiers are not held); a modified Enter shows as a literal CSI-u
+    # sequence in apps that enable the Kitty keyboard protocol.
+    if enter:
+        subprocess.run([wtype, "Return"], timeout=5, capture_output=True)
 
 
 def _inject_pynput(combo: str, enter: bool) -> None:
