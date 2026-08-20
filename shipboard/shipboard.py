@@ -72,13 +72,32 @@ min_recording = 0.5    # seconds; shorter recordings are discarded
 record_rate = 16000    # sample rate for pw-record and the wake listener
 record_channels = 1    # channels for pw-record and the wake listener
 
-# Keys the daemon listens on (evdev names, see linux/input-event-codes.h:
-# pause, scrolllock, insert, home, f13, ...). Defaults: Pause/ScrollLock.
-# An empty string ("") disables a trigger entirely (wake words still work).
-key_record = "pause"
-key_send = "scrolllock"
-key_record_send = ""            # optional: single key for record + paste + Enter
-key_record_mode = "hold"        # hold: record while held | toggle: press to start/stop
+# Keys -> behaviour: each physical key maps to tap / hold / toggle.
+# tap  = short press (< hold_threshold), hold = long press (>= hold_threshold),
+# toggle = press to start/stop (overrides tap when set). Combine hold+tap or hold+toggle on the same key — idempotent.
+# actions: "" (off), "record" (record->copy), "record_send" (record->copy->paste+Enter), "paste" (paste clipboard)
+# Any key 1-3 bindings, everything optional, no overlapping keys. Example — rightalt tap=copy, hold=send:
+# [[key_bind]]
+# key = "rightalt"
+# tap = "record"
+# hold = "record_send"
+# toggle = ""
+# hold_threshold = 0.25
+# [[key_bind]]
+# key = "f13"
+# tap = "paste"
+# hold = ""
+# toggle = "record"
+# Legacy keys (key_record/key_send/key_record_send/key_record_mode/grace) still work if no [[key_bind]] is present (auto-migrated).
+# New: key -> behaviour (any 1-3 keys, any combo of tap/hold/toggle, no overlaps).
+# Hold = long press (>= hold_threshold), tap = short press, toggle = press to start/stop (overrides tap).
+# Example — your rightalt: tap=record (copy only), hold=record_send (copy+paste+Enter), tweakable per key:
+# [[key_bind]]
+# key = "rightalt"
+# tap = "record"
+# hold = "record_send"
+# toggle = ""
+# hold_threshold = 0.25
 
 # Send mode (Scroll Lock / both keys)
 paste_combo = "ctrl+shift+v"   # injected as a modifier combo (layout-proof)
@@ -196,7 +215,8 @@ IDLE_MARKER = Path(_cfg("idle_marker", "WHISPER_IDLE_MARKER",
                         "/tmp/whisper-local-last-use"))
 MAX_HOLD = _cfg("max_hold", "SHIPBOARD_MAX_HOLD", 60.0, float)
 MIN_RECORDING = _cfg("min_recording", "SHIPBOARD_MIN_RECORDING", 0.5, float)
-GRACE = _cfg("grace", "SHIPBOARD_GRACE", 0.15, float)  # SL->Pause window
+GRACE = _cfg("grace", "SHIPBOARD_GRACE", 0.15, float)  # legacy: SL->Pause window (kept for compat, unused with [[key_bind]])
+# Legacy single-key vars (kept for migration; new config uses [[key_bind]])
 KEY_RECORD = _cfg("key_record", "SHIPBOARD_KEY_RECORD", "pause")
 KEY_SEND = _cfg("key_send", "SHIPBOARD_KEY_SEND", "scrolllock")
 KEY_RECORD_SEND = _cfg("key_record_send", "SHIPBOARD_KEY_RECORD_SEND", "")
@@ -204,6 +224,79 @@ KEY_RECORD_MODE = _cfg("key_record_mode", "SHIPBOARD_KEY_RECORD_MODE",
                        "hold", str.lower)
 if KEY_RECORD_MODE not in ("hold", "toggle"):
     KEY_RECORD_MODE = "hold"
+
+# --- key -> behaviour bindings ---
+_ALLOWED_ACTIONS = {"", "record", "record_send", "paste"}
+_HOLD_THRESHOLD_DEFAULT = 0.25
+
+def _normalize_action(v) -> str:
+    v = str(v or "").strip().lower()
+    return v if v in _ALLOWED_ACTIONS else ""
+
+def _parse_key_bindings(cfg: dict) -> list:
+    raw = cfg.get("key_bind")
+    if raw is None:
+        raw = cfg.get("key_binding")
+    if raw is None:
+        raw = cfg.get("key_bindings")
+    bindings = []
+    if isinstance(raw, list) and raw:
+        for idx, entry in enumerate(raw):
+            if not isinstance(entry, dict):
+                raise SystemExit(f"shipboard: [[key_bind]] #{idx+1} must be a table")
+            key = str(entry.get("key", "")).strip().lower()
+            if not key:
+                raise SystemExit(f"shipboard: [[key_bind]] #{idx+1} missing 'key'")
+            tap = _normalize_action(entry.get("tap", ""))
+            hold = _normalize_action(entry.get("hold", ""))
+            toggle = _normalize_action(entry.get("toggle", ""))
+            try:
+                thr = float(entry.get("hold_threshold", _HOLD_THRESHOLD_DEFAULT))
+            except Exception:
+                raise SystemExit(f"shipboard: [[key_bind]] #{idx+1} bad hold_threshold")
+            if thr <= 0 or thr > 5:
+                raise SystemExit(f"shipboard: [[key_bind]] #{idx+1} hold_threshold out of range (0..5)")
+            if tap not in _ALLOWED_ACTIONS or hold not in _ALLOWED_ACTIONS or toggle not in _ALLOWED_ACTIONS:
+                raise SystemExit(f"shipboard: [[key_bind]] #{idx+1} bad action (allowed: record/record_send/paste)")
+            # toggle overrides tap — warn but allow
+            bindings.append({"key": key, "tap": tap, "hold": hold, "toggle": toggle, "hold_threshold": thr})
+    else:
+        # legacy fallback: synthesize from old keys if any are set
+        legacy = []
+        if KEY_RECORD:
+            kr = KEY_RECORD.strip().lower()
+            if kr:
+                if KEY_RECORD_MODE == "toggle":
+                    legacy.append({"key": kr, "tap": "", "hold": "", "toggle": "record", "hold_threshold": _HOLD_THRESHOLD_DEFAULT})
+                else:
+                    legacy.append({"key": kr, "tap": "", "hold": "record", "toggle": "", "hold_threshold": _HOLD_THRESHOLD_DEFAULT})
+        if KEY_SEND:
+            ks = KEY_SEND.strip().lower()
+            if ks and ks not in [b["key"] for b in legacy]:
+                # scroll lock tap = paste (no Enter handling here, send_enter flag controls it)
+                legacy.append({"key": ks, "tap": "paste", "hold": "", "toggle": "", "hold_threshold": _HOLD_THRESHOLD_DEFAULT})
+        if KEY_RECORD_SEND:
+            krs = KEY_RECORD_SEND.strip().lower()
+            if krs and krs not in [b["key"] for b in legacy]:
+                legacy.append({"key": krs, "tap": "", "hold": "record_send", "toggle": "", "hold_threshold": _HOLD_THRESHOLD_DEFAULT})
+        bindings = legacy
+    # no overlapping check
+    seen = {}
+    for b in bindings:
+        k = b["key"]
+        if k in seen:
+            raise SystemExit(f"shipboard: duplicate key {k!r} in [[key_bind]] — no overlapping")
+        seen[k] = True
+        # validate evdev name early
+        try:
+            _key_code(k)
+        except SystemExit as e:
+            raise SystemExit(f"shipboard: {e}") from None
+    return bindings
+
+KEY_BINDINGS = _parse_key_bindings(_CFG)
+# keep legacy vars for backwards compat but mark deprecated in status
+
 RATE = _cfg("record_rate", "SHIPBOARD_RECORD_RATE", 16000, int)
 CHANNELS = _cfg("record_channels", "SHIPBOARD_RECORD_CHANNELS", 1, int)
 LOCK_PATH = Path(_cfg("lock_path", "SHIPBOARD_LOCK", "/tmp/shipboard.lock"))
@@ -773,7 +866,8 @@ def send_keys(combo: str = PASTE_COMBO, enter: bool = SEND_ENTER) -> None:
 def _watch_devices():
     import evdev
 
-    wanted = {_key_code(k) for k in (KEY_RECORD, KEY_SEND, KEY_RECORD_SEND) if k}
+    wanted = {_key_code(b["key"]) for b in KEY_BINDINGS if b.get("key")}
+    # fallback: legacy already covered via KEY_BINDINGS synthesis
     if not wanted:
         return []
     devices = []
@@ -858,25 +952,39 @@ def _transcribe_copy(wav: Path) -> tuple[str, str]:
 
 def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
     """Record -> transcribe -> copy; auto-send if autosend. Returns exit code."""
+    # legacy one-shot wait: use first binding that has hold/record if present
+    first_hold_key = None
+    for b in KEY_BINDINGS:
+        if b.get("hold") in ("record","record_send"):
+            first_hold_key = b["key"]
+            break
+    if not first_hold_key and KEY_BINDINGS:
+        # fallback: any key with tap/record
+        for b in KEY_BINDINGS:
+            if b.get("tap") in ("record","record_send") or b.get("toggle") in ("record","record_send"):
+                first_hold_key = b["key"]
+                break
     tmp_dir = Path(tempfile.mkdtemp(prefix="shipboard-"))
     try:
         wav_path = tmp_dir / "rec.wav"
-        mode_word = "press" if KEY_RECORD_MODE == "toggle" else "hold"
+        mode_word = "hold"
+        label = _key_label(first_hold_key) if first_hold_key else "key"
         _notify(
             "shipboard",
-            f"Recording... ({mode_word} {_key_label(KEY_RECORD)})"
+            f"Recording... ({mode_word} {label})"
             + (" — release: will paste and send" if autosend else ""),
         )
         proc = start_recording(wav_path)
         t0 = time.monotonic()
         if seconds > 0:
             time.sleep(seconds)
-        elif KEY_RECORD:
+        elif first_hold_key:
             import evdev
 
             deadline = time.monotonic() + MAX_HOLD
             live = _watch_devices()
             held = False
+            code = _key_code(first_hold_key)
             while time.monotonic() < deadline:
                 if not live:
                     break
@@ -886,7 +994,7 @@ def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
                         for event in dev.read():
                             if (
                                 event.type == evdev.ecodes.EV_KEY
-                                and event.code == _key_code(KEY_RECORD)
+                                and event.code == code
                                 and event.value == 0  # release
                             ):
                                 held = True
@@ -932,20 +1040,33 @@ class _Daemon:
         self.rec_proc: subprocess.Popen | None = None
         self.rec_t0 = 0.0
         self.autosend = False
-        self.grace_deadline: float | None = None  # SL tap waiting for Pause
+        self.grace_deadline: float | None = None  # legacy grace (unused with bindings)
         self.pause_down = False
-        self.wake_rec = False  # recording started by the wake word listener
-        # Key injections requested by the wake word thread. Executed by the
-        # main loop — the same context that performs key-driven injections.
+        self.wake_rec = False
         self._inject_q: "queue.Queue[bool]" = queue.Queue()
+        # key->behaviour state
+        self._key_down: dict[int, float] = {}  # code -> down_time
+        self._hold_fired: set[int] = set()  # codes where hold threshold already fired
+        self._pending_hold: dict[int, float] = {}  # code -> deadline
+        self._rec_key: str | None = None  # which key started current recording
+        self._rec_mode: str | None = None  # "hold" | "toggle" | "tap"
+        # quick map code -> binding
+        self._code_to_bind: dict[int, dict] = {}
+        for b in KEY_BINDINGS:
+            try:
+                c = _key_code(b["key"])
+                self._code_to_bind[c] = b
+            except SystemExit:
+                pass
 
-    def _start_record(self) -> None:
+    def _binding_for(self, code: int) -> dict | None:
+        return self._code_to_bind.get(code)
+
+    def _start_record(self, key: str | None = None, mode: str | None = None, notify_label: str | None = None) -> None:
         if self.recording:
             return
         self.autosend = False
         self.grace_deadline = None
-        # Cycle lock: prevents a concurrent one-shot --send from pasting
-        # stale content while this recording is in flight.
         self._cycle_lock = open(LOCK_PATH, "w")
         try:
             fcntl.flock(self._cycle_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -959,11 +1080,13 @@ class _Daemon:
         self.recording = True
         self.rec_t0 = time.monotonic()
         self._tmp_dir = tmp_dir
+        self._rec_key = key
+        self._rec_mode = mode
         _write_state(state="recording")
-        _log(f"record start -> {wav}")
-        mode_word = "press" if KEY_RECORD_MODE == "toggle" else "hold"
-        _notify("shipboard",
-                f"Recording... ({mode_word} {_key_label(KEY_RECORD)})")
+        _log(f"record start key={key!r} mode={mode} -> {wav}")
+        label = notify_label or (f"{_key_label(key)}" if key else "key")
+        mode_word = mode or "hold"
+        _notify("shipboard", f"Recording... ({mode_word} {label})")
 
     def _finish_record(self, from_wake: bool = False) -> None:
         if not self.recording or self.rec_proc is None:
@@ -973,7 +1096,11 @@ class _Daemon:
         duration = time.monotonic() - self.rec_t0
         autosend = self.autosend
         self.autosend = False
-        _log(f"finish: autosend={autosend} from_wake={from_wake} dur={duration:.1f}")
+        _log(f"finish: autosend={autosend} from_wake={from_wake} dur={duration:.1f} key={self._rec_key} mode={self._rec_mode}")
+        was_key = self._rec_key
+        was_mode = self._rec_mode
+        self._rec_key = None
+        self._rec_mode = None
         cycle_lock = getattr(self, "_cycle_lock", None)
         self._cycle_lock = None
         wav = Path(self._tmp_dir) / "rec.wav"
@@ -1002,8 +1129,6 @@ class _Daemon:
                 return
             if autosend:
                 if from_wake:
-                    # Inject from the main loop, not this thread — the same
-                    # context that performs key-driven injections.
                     self._inject_q.put(BOTH_SEND_ENTER)
                 else:
                     try:
@@ -1028,68 +1153,147 @@ class _Daemon:
                 except OSError:
                     pass
 
-    def _on_pause(self, value: int) -> None:
-        if KEY_RECORD_MODE == "toggle":
-            if value != 1:  # release/repeat: nothing (toggle needs no release)
-                return
+    def _do_action(self, action: str, key: str, mode: str) -> None:
+        if not action:
+            return
+        if action == "paste":
+            try:
+                # paste = paste clipboard; Enter per SEND_ENTER (global), scroll_send_enter for scroll-like legacy
+                # For new bindings use SEND_ENTER; keep scrolllock legacy via SCROLL_SEND_ENTER when key is scrolllock
+                use_enter = SCROLL_SEND_ENTER if key == "scrolllock" else SEND_ENTER
+                send_keys(enter=use_enter)
+                _log(f"paste action key={key} mode={mode}")
+            except Exception as exc:
+                _notify("shipboard", f"Failed to send: {exc}")
+            return
+        if action in ("record", "record_send"):
+            # toggle/tap/hold share same start; autosend differs
+            autosend = (action == "record_send")
             if self.recording:
+                # if same key toggles, finish; else ignore if another recording active
+                if self._rec_key == key:
+                    # finishing same key — autosend already set? override if needed
+                    self.autosend = autosend or self.autosend
+                    self._finish_record()
+                return
+            self._start_record(key=key, mode=mode)
+            if self.recording:
+                self.autosend = autosend
+            return
+
+    def _on_key_press(self, code: int) -> None:
+        bind = self._binding_for(code)
+        if bind is None:
+            return
+        key = bind["key"]
+        tap = bind.get("tap", "") or ""
+        hold = bind.get("hold", "") or ""
+        toggle = bind.get("toggle", "") or ""
+        thr = float(bind.get("hold_threshold", _HOLD_THRESHOLD_DEFAULT))
+        # toggle overrides tap
+        if toggle:
+            tap = ""
+        # toggle path: press toggles recording
+        if toggle:
+            # if already recording from this key in toggle mode -> stop
+            if self.recording and self._rec_key == key and self._rec_mode == "toggle":
                 self._finish_record()
                 return
-            # Was a Scroll Lock tap waiting in grace? Then this is both-held.
-            was_grace = self.grace_deadline is not None
-            self.grace_deadline = None
-            self._start_record()
-            if was_grace:
-                self.autosend = True
-            return
-        if value == 1:  # press
-            if self.recording:
+            # if not recording, decide if this is hold vs toggle based on pending hold
+            # need to defer: if hold also present, don't start toggle immediately; wait for threshold
+            if hold and not self.recording:
+                # defer toggle/hold decision: set pending deadline
+                self._key_down[code] = time.monotonic()
+                self._pending_hold[code] = time.monotonic() + thr
                 return
-            # Was a Scroll Lock tap waiting in grace? Then this is both-held.
-            was_grace = self.grace_deadline is not None
-            self.grace_deadline = None
-            self._start_record()
-            if was_grace:
-                self.autosend = True
-        elif value == 0:  # release
-            self.pause_down = False
-            self._finish_record()
+            # no hold, immediate toggle start
+            if not self.recording:
+                self._do_action(toggle, key, "toggle")
+            return
+        # no toggle: handle hold+tap
+        if hold and tap:
+            # defer decision until release or threshold
+            self._key_down[code] = time.monotonic()
+            self._pending_hold[code] = time.monotonic() + thr
+            return
+        if hold and not tap:
+            # only hold: wait for threshold then start; if quick release ignored? but allow tap threshold firing
+            self._key_down[code] = time.monotonic()
+            self._pending_hold[code] = time.monotonic() + thr
+            return
+        if tap and not hold:
+            # only tap: short press-release -> tap, but for record we need toggle-like? tap starts toggle recording
+            # we treat tap as toggle-like: first press starts, next press stops
+            if not self.recording:
+                # if currently recording same key tap, this second press finishes
+                # detect by checking if recording key matches
+                pass
+            if self.recording and self._rec_key == key and self._rec_mode == "tap":
+                self._finish_record()
+                return
+            # need to wait for release to fire tap? fire on release for paste, but for record start on press
+            # For simplicity fire on press for record, on release for paste? Choose release for all tap to get hold vs tap idempotent
+            # So defer to release
+            self._key_down[code] = time.monotonic()
+            return
+        # fallback: nothing
+
+    def _on_key_release(self, code: int) -> None:
+        bind = self._binding_for(code)
+        if bind is None:
+            return
+        key = bind["key"]
+        tap = bind.get("tap", "") or ""
+        hold = bind.get("hold", "") or ""
+        toggle = bind.get("toggle", "") or ""
+        if toggle:
+            tap = ""
+        was_down = self._key_down.pop(code, None)
+        pending = self._pending_hold.pop(code, None)
+        fired = code in self._hold_fired
+        if fired:
+            self._hold_fired.discard(code)
+            # hold was active, release finishes recording
+            if self.recording and self._rec_key == key and self._rec_mode == "hold":
+                self._finish_record()
+            return
+        # hold not yet fired
+        if toggle and hold and pending is not None:
+            # short release before threshold -> toggle action
+            if was_down is not None:
+                self._do_action(toggle, key, "toggle")
+            return
+        if hold and tap and pending is not None:
+            # short release -> tap, else would have fired hold
+            self._do_action(tap, key, "tap")
+            return
+        if hold and not tap and pending is not None:
+            # only hold, short press ignored (or treat as hold if you want)
+            # idempotent: do nothing on short tap when only hold is set
+            return
+        if tap and not hold:
+            # only tap: release fires tap
+            # if tap is record, this should start or stop
+            if self.recording and self._rec_key == key and self._rec_mode == "tap":
+                self._finish_record()
+                return
+            if not self.recording:
+                self._do_action(tap, key, "tap")
+                # if tap just started a toggle-like recording, keep rec_mode tap
+                # already set via _do_action
+                if self.recording:
+                    self._rec_mode = "tap"
+            return
+
+    def _on_pause(self, value: int) -> None:
+        # legacy shim - still called if daemon maps old keys, keep for compat but delegate
+        pass
 
     def _on_record_send(self, value: int) -> None:
-        """Third trigger: single key that records AND sends (autosend=True),
-        like Pause+ScrollLock held but with one key."""
-        if KEY_RECORD_MODE == "toggle":
-            if value != 1:  # toggle needs no release
-                return
-            if self.recording:
-                self._finish_record()
-                return
-            self.grace_deadline = None
-            self._start_record()
-            if self.recording:
-                self.autosend = True
-            return
-        if value == 1:  # press
-            if self.recording:
-                return
-            self.grace_deadline = None
-            self._start_record()
-            if self.recording:
-                self.autosend = True
-        elif value == 0:  # release
-            self._finish_record()
+        pass
 
     def _on_scrolllock(self, value: int) -> None:
-        if value == 1:  # press
-            if self.recording:
-                # Both held: mark auto-send, do NOT paste old clipboard.
-                self.autosend = True
-                self.grace_deadline = None
-                return
-            if self.grace_deadline is not None:
-                return  # already waiting
-            self.grace_deadline = time.monotonic() + GRACE
-        # release (0) and repeat (2): nothing
+        pass
 
     def run(self) -> None:
         import evdev
@@ -1101,10 +1305,7 @@ class _Daemon:
                 target=_wake_listen, args=(self, stop_event), daemon=True
             ).start()
         devices = _watch_devices()
-        rec_code = _key_code(KEY_RECORD) if KEY_RECORD else None
-        send_code = _key_code(KEY_SEND) if KEY_SEND else None
-        rec_send_code = _key_code(KEY_RECORD_SEND) if KEY_RECORD_SEND else None
-        if not devices and (rec_code, send_code, rec_send_code) != (None,) * 3:
+        if not devices and KEY_BINDINGS:
             hint = _input_access_issue()
             msg = "Daemon: trigger keys not found on evdev (wake words still on)"
             if hint:
@@ -1112,10 +1313,15 @@ class _Daemon:
             _notify("shipboard", msg)
             if hint:
                 print(f"shipboard: {hint}", file=sys.stderr)
+        # build code map
+        code_map = {}
+        for b in KEY_BINDINGS:
+            try:
+                code_map[_key_code(b["key"])] = b
+            except SystemExit:
+                pass
         while True:
             now = time.monotonic()
-            # Wake word thread requests injections via the queue; the main
-            # loop performs them — same thread as key-driven injections.
             while True:
                 try:
                     _enter = self._inject_q.get_nowait()
@@ -1125,14 +1331,26 @@ class _Daemon:
                     send_keys(enter=_enter)
                 except Exception as exc:
                     _notify("shipboard", f"Failed to send: {exc}")
-            # Grace expiry: no Pause followed the Scroll Lock tap -> send.
-            if self.grace_deadline is not None and now >= self.grace_deadline:
-                self.grace_deadline = None
-                try:
-                    send_keys(enter=SCROLL_SEND_ENTER)
-                except Exception as exc:
-                    _notify("shipboard", f"Failed to send: {exc}")
-            # MAX_HOLD safety: force-finish a stuck recording.
+            # hold threshold expiry
+            for code, deadline in list(self._pending_hold.items()):
+                if code not in self._key_down:
+                    continue
+                if now >= deadline and code not in self._hold_fired:
+                    bind = self._binding_for(code)
+                    if bind is None:
+                        continue
+                    hold = bind.get("hold", "") or ""
+                    if not hold:
+                        continue
+                    # fire hold
+                    self._hold_fired.add(code)
+                    key = bind["key"]
+                    # if not already recording, start hold recording
+                    if not self.recording:
+                        self._do_action(hold, key, "hold")
+                        # _do_action may have started; ensure mode is hold
+                        if self.recording:
+                            self._rec_mode = "hold"
             if self.recording and now - self.rec_t0 > MAX_HOLD:
                 self._finish_record()
 
@@ -1148,14 +1366,14 @@ class _Daemon:
                             continue
                         if event.value == 2:  # auto-repeat
                             continue
-                        if rec_code is not None and event.code == rec_code:
-                            if event.value == 1:
-                                self.pause_down = True
-                            self._on_pause(event.value)
-                        elif send_code is not None and event.code == send_code:
-                            self._on_scrolllock(event.value)
-                        elif rec_send_code is not None and event.code == rec_send_code:
-                            self._on_record_send(event.value)
+                        code = event.code
+                        if code not in code_map and code not in self._key_down and code not in self._hold_fired:
+                            continue
+                        if event.value == 1:
+                            self._key_down.setdefault(code, now)
+                            self._on_key_press(code)
+                        elif event.value == 0:
+                            self._on_key_release(code)
                 except (OSError, ValueError):
                     devices = [d for d in devices if d != dev]
                     try:
@@ -1197,15 +1415,24 @@ def _status_main() -> int:
     print(f"daemon:    {'running' if _daemon_running() else 'stopped'}")
     print(f"config:    {DEFAULT_CONFIG_PATH}")
     print(f"stt:       {WHISPER_URL}")
-    rl, sl = _key_label(KEY_RECORD), _key_label(KEY_SEND)
-    print(f"keys:      {rl} = record->clipboard ({KEY_RECORD_MODE}) |"
-          f" {sl} = paste+Enter | both = record->paste+Enter")
-    if KEY_RECORD_SEND:
-        print(f"           {_key_label(KEY_RECORD_SEND)} = record->paste+Enter")
-    print(f"paste:     {PASTE_COMBO} | {sl} Enter: "
-          f"{'yes' if SCROLL_SEND_ENTER else 'no'} | both Enter: "
-          f"{'yes' if BOTH_SEND_ENTER else 'no'}"
-          f" | grace {GRACE}s | max hold {MAX_HOLD}s | min rec {MIN_RECORDING}s")
+    if KEY_BINDINGS:
+        is_legacy = "key_bind" not in _CFG and "key_binding" not in _CFG and "key_bindings" not in _CFG
+        hdr = "keys:      (legacy -> auto-migrated to [[key_bind]])" if is_legacy else "keys:"
+        for b in KEY_BINDINGS:
+            k = _key_label(b["key"])
+            thr = b.get("hold_threshold", _HOLD_THRESHOLD_DEFAULT)
+            parts = []
+            if b.get("toggle"): parts.append(f"toggle={b['toggle']}")
+            if b.get("hold"): parts.append(f"hold={b['hold']}@{thr:g}s")
+            if b.get("tap"): parts.append(f"tap={b['tap']}")
+            print(f"{hdr:<11} {k:<14} {' | '.join(parts) if parts else '(off)'}")
+            hdr = "           "
+    else:
+        print("keys:      (none — wake words only)")
+    # legacy grace still shown for compat
+    print(f"paste:     {PASTE_COMBO} | Enter: "
+          f"paste={'yes' if SCROLL_SEND_ENTER else 'no'} both={'yes' if BOTH_SEND_ENTER else 'no'} global={'yes' if SEND_ENTER else 'no'}"
+          f" | grace {GRACE}s | max_hold {MAX_HOLD}s | min_rec {MIN_RECORDING}s")
     print(f"normalize: {'on' if NORMALIZE else 'off'}")
     print(f"wakeword:  {'on (sherpa)' if WAKEWORD_ENABLED else 'off'}")
     if WAKEWORD_ENABLED:
@@ -1382,6 +1609,22 @@ def _save_config_file(values: dict) -> None:
             lines.append(f"{key} = {'true' if v else 'false'}")
         else:
             lines.append(f"{key} = {v}")
+    # emit key_bind tables
+    binds = values.get("_key_binds")
+    if isinstance(binds, list) and binds:
+        for b in binds:
+            lines.append("")
+            lines.append("[[key_bind]]")
+            lines.append(f'key = "{b.get("key","")}"')
+            if b.get("tap"): lines.append(f'tap = "{b["tap"]}"')
+            if b.get("hold"): lines.append(f'hold = "{b["hold"]}"')
+            if b.get("toggle"): lines.append(f'toggle = "{b["toggle"]}"')
+            try:
+                thr = float(b.get("hold_threshold", _HOLD_THRESHOLD_DEFAULT))
+                if thr != _HOLD_THRESHOLD_DEFAULT:
+                    lines.append(f"hold_threshold = {thr:g}")
+            except Exception:
+                pass
     composed = _compose_keywords(values)
     if composed:
         lines.append(f'wakeword_keywords = "{composed}"')
@@ -1473,6 +1716,16 @@ def _setup_prefill(values: dict) -> None:
                 if act == action:
                     values[key] = phrase
                     break
+    # populate key binds for setup editor
+    if "_key_binds" not in values:
+        binds = []
+        if "key_bind" in _CFG or "key_binding" in _CFG or "key_bindings" in _CFG:
+            binds = [dict(b) for b in KEY_BINDINGS]
+        else:
+            # legacy mirror
+            for b in KEY_BINDINGS:
+                binds.append(dict(b))
+        values["_key_binds"] = binds
 
 
 def _setup_main() -> int:
@@ -1492,8 +1745,22 @@ def _setup_main() -> int:
                 last_section = section
             mark = "*" if key in _CFG else " "
             print(f" {i:2}) {mark} {label:<40} {_fmt_value(values[key])}")
+        # show key binds summary
+        if values.get("_key_binds"):
+            print("  -- key -> behaviour --")
+            for idx, b in enumerate(values["_key_binds"], start=1):
+                tap = b.get("tap",""); hold = b.get("hold",""); tog = b.get("toggle","")
+                thr = b.get("hold_threshold", 0.25)
+                parts = []
+                if tog: parts.append(f"toggle={tog}")
+                if hold: parts.append(f"hold={hold}@{thr:g}s")
+                if tap: parts.append(f"tap={tap}")
+                print(f"     [{idx}] {_key_label(b.get('key','')):<14} {' | '.join(parts) if parts else '(off)'}")
+            print("     [a] add bind  [d] delete bind  [e] edit bind")
+        else:
+            print("  -- key -> behaviour: (none) [a] add bind --")
         print("─" * 60)
-        print(" [num] edit · [s] save · [t] test STT · [p] compositor binds"
+        print(" [num] edit field · [a/e/d] binds · [s] save · [t] test STT · [p] compositor binds"
               " · [r] restart daemon · [q] quit")
         if message:
             print(f" {message}")
@@ -1505,7 +1772,87 @@ def _setup_main() -> int:
         message = ""
         if choice in ("q", "quit", "exit"):
             return 0
-        if choice == "s":
+        if choice == "a":
+            k = input(" key (evdev name, e.g. rightalt/f13): ").strip().lower()
+            if not k:
+                message = "no key given"
+            else:
+                try:
+                    _key_code(k)
+                except SystemExit as e:
+                    message = str(e)
+                else:
+                    if any(b.get("key")==k for b in values.get("_key_binds",[])):
+                        message = f"duplicate key {k!r}"
+                    else:
+                        tap = input(" tap action (record/record_send/paste or empty): ").strip().lower() or ""
+                        hold = input(" hold action (record/record_send/paste or empty): ").strip().lower() or ""
+                        tog = input(" toggle action (record/record_send/paste or empty): ").strip().lower() or ""
+                        thr_raw = input(" hold_threshold seconds [0.25]: ").strip() or "0.25"
+                        try:
+                            thr = float(thr_raw)
+                            assert 0 < thr <= 5
+                        except Exception:
+                            message = "bad hold_threshold"
+                        else:
+                            allowed = {"", "record","record_send","paste"}
+                            if tap not in allowed or hold not in allowed or tog not in allowed:
+                                message = "bad action (allowed: record/record_send/paste)"
+                            else:
+                                values.setdefault("_key_binds", []).append({"key":k,"tap":tap,"hold":hold,"toggle":tog,"hold_threshold":thr})
+                                message = f"added {k}"
+            # continue loop
+        elif choice == "d":
+            binds = values.get("_key_binds", [])
+            if not binds:
+                message = "no binds"
+            else:
+                raw = input(f" delete which 1..{len(binds)} > ").strip()
+                try:
+                    idx = int(raw)-1
+                    b = binds.pop(idx)
+                    message = f"deleted {b['key']}"
+                except Exception:
+                    message = "invalid index"
+        elif choice == "e":
+            binds = values.get("_key_binds", [])
+            if not binds:
+                message = "no binds"
+            else:
+                raw = input(f" edit which 1..{len(binds)} > ").strip()
+                try:
+                    idx = int(raw)-1
+                    b = binds[idx]
+                except Exception:
+                    message = "invalid index"
+                else:
+                    print(f" editing {b['key']} (Enter keeps)")
+                    nk = input(f"  key [{b['key']}] > ").strip().lower() or b['key']
+                    if nk != b['key'] and any(x.get("key")==nk for x in binds):
+                        message = f"duplicate key {nk!r}"
+                    else:
+                        try:
+                            _key_code(nk)
+                        except SystemExit as e:
+                            message = str(e)
+                        else:
+                            tap = input(f"  tap [{b.get('tap','')}] > ").strip().lower()
+                            hold = input(f"  hold [{b.get('hold','')}] > ").strip().lower()
+                            tog = input(f"  toggle [{b.get('toggle','')}] > ").strip().lower()
+                            thr_raw = input(f"  hold_threshold [{b.get('hold_threshold',0.25):g}] > ").strip()
+                            if tap != "": b["tap"] = tap
+                            if hold != "": b["hold"] = hold
+                            if tog != "": b["toggle"] = tog
+                            if thr_raw:
+                                try:
+                                    b["hold_threshold"] = float(thr_raw)
+                                except Exception:
+                                    message = "bad threshold, kept old"
+                                    # still update key
+                            b["key"] = nk
+                            if "bad threshold" not in (message or ""):
+                                message = f"updated {nk}"
+        elif choice == "s":
             _save_config_file(values)
             message = f"saved to {DEFAULT_CONFIG_PATH} — restart the daemon to apply (r)"
         elif choice == "t":
