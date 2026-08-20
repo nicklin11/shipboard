@@ -1609,7 +1609,10 @@ def _save_config_file(values: dict) -> None:
             lines.append(f"{key} = {'true' if v else 'false'}")
         else:
             lines.append(f"{key} = {v}")
-    # emit key_bind tables
+    composed = _compose_keywords(values)
+    if composed:
+        lines.append(f'wakeword_keywords = "{composed}"')
+    # emit key_bind tables LAST so bare keys are not swallowed (TOML: bare keys after [[array]] belong to that table)
     binds = values.get("_key_binds")
     if isinstance(binds, list) and binds:
         for b in binds:
@@ -1625,9 +1628,6 @@ def _save_config_file(values: dict) -> None:
                     lines.append(f"hold_threshold = {thr:g}")
             except Exception:
                 pass
-    composed = _compose_keywords(values)
-    if composed:
-        lines.append(f'wakeword_keywords = "{composed}"')
     lines.append("")
     DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     DEFAULT_CONFIG_PATH.write_text("\n".join(lines))
