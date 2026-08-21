@@ -1698,22 +1698,8 @@ def _setup_main() -> int:
                 last_section = section
             mark = "*" if key in _CFG else " "
             print(f" {i:2}) {mark} {label:<40} {_fmt_value(values[key])}")
-        # show key binds summary
-        if values.get("_key_binds"):
-            print("  -- key -> behaviour --")
-            for idx, b in enumerate(values["_key_binds"], start=1):
-                tap = b.get("tap",""); hold = b.get("hold",""); tog = b.get("toggle","")
-                thr = b.get("hold_threshold", 0.25)
-                parts = []
-                if tog: parts.append(f"toggle={tog}")
-                if hold: parts.append(f"hold={hold}@{thr:g}s")
-                if tap: parts.append(f"tap={tap}")
-                print(f"     [{idx}] {_key_label(b.get('key','')):<14} {' | '.join(parts) if parts else '(off)'}")
-            print("     [a] add bind  [d] delete bind  [e] edit bind")
-        else:
-            print("  -- key -> behaviour: (none) [a] add bind --")
         print("─" * 60)
-        print(" [num] edit setting  ·  [k] keys  ·  [a] advanced  ·  [s] save  ·  [t] test STT  ·  [p] binds"
+        print(" [num] edit setting  ·  [k] keys  ·  [a] advanced  ·  [s] save  ·  [t] test STT  ·  [p] compositor"
               "  ·  [r] restart  ·  [q] quit")
         if message:
             print(f" {message}")
@@ -1883,20 +1869,117 @@ def _tui_main() -> int:
     values = _field_defaults()
     values.update(_CFG)
     _setup_prefill(values)
+    show_advanced = False  # TUI also collapses Advanced by default
 
-    rows = []  # ("section", name) | ("field", _SETUP_FIELDS index)
-    last_section = None
-    for i, (key, label, conv, section) in enumerate(_SETUP_FIELDS):
-        if section != last_section:
-            rows.append(("section", section))
-            last_section = section
-        rows.append(("field", i))
+    def _build_rows():
+        rows_ = []
+        # Keys card as a navigable row (not a SETUP_FIELD)
+        rows_.append(("keys", None))
+        last_sec = None
+        for i, (key, label, conv, section) in enumerate(_SETUP_FIELDS):
+            if section == "Advanced" and not show_advanced:
+                if last_sec != "Advanced":
+                    rows_.append(("section", "… Advanced  [a] show/hide"))
+                    last_sec = "Advanced"
+                continue
+            if section != last_sec:
+                rows_.append(("section", section))
+                last_sec = section
+            rows_.append(("field", i))
+        return rows_
+
+    rows = _build_rows()
 
     def _next_field(sel: int, step: int) -> int:
         i = sel + step
-        while 0 <= i < len(rows) and rows[i][0] != "field":
+        while 0 <= i < len(rows) and rows[i][0] not in ("field", "keys"):
             i += step
         return i if 0 <= i < len(rows) else sel
+
+    def _keys_summary() -> str:
+        binds = values.get("_key_binds") or []
+        if not binds:
+            return "Keys: (none yet — press k to add)"
+        parts = []
+        for b in binds:
+            tap = b.get("tap",""); hold = b.get("hold",""); tog = b.get("toggle",""); thr = b.get("hold_threshold",0.25)
+            segs = []
+            if tog: segs.append(f"toggle={tog}")
+            if hold: segs.append(f"hold {hold}@{thr:g}s")
+            if tap: segs.append(f"tap {tap}")
+            label = _key_label(b.get("key",""))
+            parts.append(f"{label}: {' · '.join(segs) if segs else '(off)'}")
+        return "Keys: " + "  |  ".join(parts)
+
+    def _prompt_line(stdscr_, prompt, default=""):
+        h_, w_ = stdscr_.getmaxyx()
+        try:
+            stdscr_.move(h_-1, 0); stdscr_.clrtoeol()
+            stdscr_.addnstr(h_-1, 0, prompt + (f" [{default}]" if default else "") + " ", w_-1)
+            stdscr_.noutrefresh(); curses.doupdate()
+        except curses.error:
+            pass
+        curses.echo()
+        try: curses.curs_set(1)
+        except curses.error: pass
+        try:
+            raw = stdscr_.getstr(h_-1, len(prompt)+2 + (len(default)+3 if default else 1), 50)
+            s = raw.decode(errors="replace").strip()
+        except curses.error:
+            s = ""
+        finally:
+            curses.noecho()
+            try: curses.curs_set(0)
+            except curses.error: pass
+        return s if s else default
+
+    def _edit_keys_flow(stdscr_) -> None:
+        binds = values.setdefault("_key_binds", [])
+        ch = _prompt_line(stdscr_, "Keys: [1] add  [2] edit  [3] remove  [Enter] back", "")
+        if ch == "1":
+            k = _prompt_line(stdscr_, "key (e.g. rightalt/f13)", "").strip().lower()
+            if not k: return
+            try: _key_code(k)
+            except SystemExit: return
+            if any(b.get("key")==k for b in binds): return
+            tap = _prompt_line(stdscr_, "tap (record/record_send/paste/-)", "").strip().lower()
+            if tap == "-": tap=""
+            hold = _prompt_line(stdscr_, "hold (record/record_send/paste/-)", "").strip().lower()
+            if hold == "-": hold=""
+            tog = _prompt_line(stdscr_, "toggle (record/record_send/paste/-)", "").strip().lower()
+            if tog == "-": tog=""
+            thr_raw = _prompt_line(stdscr_, "hold threshold seconds", "0.25").strip() or "0.25"
+            try: thr = float(thr_raw); assert 0 < thr <= 5
+            except Exception: return
+            if tap not in _ALLOWED_ACTIONS or hold not in _ALLOWED_ACTIONS or tog not in _ALLOWED_ACTIONS: return
+            binds.append({"key":k,"tap":tap,"hold":hold,"toggle":tog,"hold_threshold":thr})
+        elif ch == "2":
+            if not binds: return
+            lst = ", ".join(f"{i+1}:{b['key']}" for i,b in enumerate(binds))
+            raw = _prompt_line(stdscr_, f"edit which ({lst})", "")
+            try: idx = int(raw)-1; b = binds[idx]
+            except Exception: return
+            nk = _prompt_line(stdscr_, f"key [{b['key']}]", b['key']).strip().lower() or b['key']
+            if nk != b['key'] and any(x.get("key")==nk for x in binds): return
+            try: _key_code(nk)
+            except SystemExit: return
+            tap = _prompt_line(stdscr_, f"tap [{b.get('tap','') or '-'}]", "").strip().lower()
+            hold = _prompt_line(stdscr_, f"hold [{b.get('hold','') or '-'}]", "").strip().lower()
+            tog = _prompt_line(stdscr_, f"toggle [{b.get('toggle','') or '-'}]", "").strip().lower()
+            thr_raw = _prompt_line(stdscr_, f"threshold [{b.get('hold_threshold',0.25):g}]", "").strip()
+            if tap != "": b["tap"] = "" if tap=="-" else tap
+            if hold != "": b["hold"] = "" if hold=="-" else hold
+            if tog != "": b["toggle"] = "" if tog=="-" else tog
+            if thr_raw:
+                try: b["hold_threshold"] = float(thr_raw)
+                except Exception: pass
+            b["key"] = nk
+        elif ch == "3":
+            if not binds: return
+            lst = ", ".join(f"{i+1}:{b['key']}" for i,b in enumerate(binds))
+            raw = _prompt_line(stdscr_, f"remove which ({lst})", "").strip()
+            try: idx = int(raw)-1; binds.pop(idx)
+            except Exception: return
 
     def _show_binds(stdscr) -> None:
         stdscr.erase()
@@ -1994,10 +2077,9 @@ def _tui_main() -> int:
         except curses.error:
             pass
         sel, scroll = 0, 0
-        # Start on the first field, not a section header.
-        while sel < len(rows) and rows[sel][0] != "field":
+        while sel < len(rows) and rows[sel][0] not in ("field", "keys"):
             sel += 1
-        message = "↑/↓ navigate · Enter edit · s save · t test STT · p binds · r restart · q quit"
+        message = "↑/↓ move · Enter/k edit keys · a advanced · s save · t test · p compositor · r restart · q quit"
         while True:
             stdscr.erase()
             h, w = stdscr.getmaxyx()
@@ -2011,7 +2093,7 @@ def _tui_main() -> int:
                 scroll = sel_y - 1
             elif sel_y - scroll > h - 3:
                 scroll = sel_y - (h - 3)
-            title = f" shipboard setup — {DEFAULT_CONFIG_PATH} "
+            title = f" shipboard setup — {DEFAULT_CONFIG_PATH}  ({'on' if _daemon_running() else 'off'}) "
             try:
                 stdscr.addnstr(0, 0, title, w - 1, curses.A_REVERSE)
             except curses.error:
@@ -2024,6 +2106,10 @@ def _tui_main() -> int:
                     if kind == "section":
                         stdscr.addnstr(yy, 0, f"  == {payload} ==", w - 1,
                                        curses.A_BOLD)
+                    elif kind == "keys":
+                        selected = rows[sel][0] == "keys"
+                        attrs = curses.A_REVERSE if selected else curses.A_BOLD
+                        stdscr.addnstr(yy, 0, f"  {_keys_summary()}", w - 1, attrs)
                     else:
                         key, label, conv, _section = _SETUP_FIELDS[payload]
                         mark = "*" if key in _CFG else " "
@@ -2041,14 +2127,28 @@ def _tui_main() -> int:
             stdscr.noutrefresh()
             curses.doupdate()
             ch = stdscr.getch()
-            if ch in (curses.KEY_UP, ord("k")):
+            if ch in (curses.KEY_UP,):
                 sel = _next_field(sel, -1)
-            elif ch in (curses.KEY_DOWN, ord("j")):
+            elif ch in (curses.KEY_DOWN,):
                 sel = _next_field(sel, 1)
             elif ch in (curses.KEY_RESIZE,):
                 continue
             elif ch in (10, 13, curses.KEY_ENTER):
-                message = _edit_field(stdscr, sel, message)
+                if rows[sel][0] == "keys":
+                    _edit_keys_flow(stdscr)
+                    message = "keys: " + _keys_summary()
+                else:
+                    message = _edit_field(stdscr, sel, message)
+            elif ch == ord("k"):
+                _edit_keys_flow(stdscr)
+                message = "keys: " + _keys_summary()
+            elif ch == ord("a"):
+                show_advanced = not show_advanced
+                rows = _build_rows()
+                sel = 0
+                while sel < len(rows) and rows[sel][0] not in ("field", "keys"):
+                    sel += 1
+                message = "advanced shown" if show_advanced else "advanced hidden"
             elif ch == ord("s"):
                 _save_config_file(values)
                 message = "saved to ~/.config/shipboard/shipboard.toml - restart daemon to apply (r)"
