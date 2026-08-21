@@ -1657,6 +1657,64 @@ def _setup_main() -> int:
     values = _field_defaults()
     values.update(_CFG)
     _setup_prefill(values)
+    def _capture_key_cli() -> str | None:
+        hint = "Press the key to bind (8s, Esc cancels)…"
+        print(f" {hint}")
+        try:
+            import evdev, select
+            devs = []
+            for path in evdev.list_devices():
+                try:
+                    d = evdev.InputDevice(path)
+                    caps = d.capabilities(verbose=False)
+                    if caps.get(evdev.ecodes.EV_KEY):
+                        devs.append(d)
+                except Exception:
+                    continue
+            import time as _time
+            deadline = _time.monotonic() + 8
+            while _time.monotonic() < deadline:
+                r,_,_ = select.select(devs, [], [], 0.1)
+                for d in r:
+                    try:
+                        for ev in d.read():
+                            if ev.type == evdev.ecodes.EV_KEY and ev.value == 1:
+                                raw = None
+                                if hasattr(evdev.ecodes, "KEY"):
+                                    raw = evdev.ecodes.KEY.get(ev.code)
+                                if raw is None:
+                                    for attr in dir(evdev.ecodes):
+                                        if attr.startswith("KEY_") and getattr(evdev.ecodes, attr) == ev.code:
+                                            raw = attr; break
+                                name = raw[4:].lower() if raw and raw.startswith("KEY_") else str(ev.code)
+                                print(f"  captured: {name} ({_key_label(name)})")
+                                return name
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return None
+
+    def _pick_action_cli(prompt, default=""):
+        opts = [("record","copy only"), ("record_send","copy+paste+Enter"), ("paste","paste clipboard"), ("","off")]
+        # show numbered picker
+        print(f"  {prompt}")
+        for i,(v,lbl) in enumerate(opts, start=1):
+            cur = " ←" if v==default else ""
+            print(f"   {i}) {v or 'off':14} {lbl}{cur}")
+        raw = input("  choose 1-4 [Enter keeps]: ").strip()
+        if not raw:
+            return default
+        try:
+            idx = int(raw)-1
+            if 0 <= idx < len(opts):
+                return opts[idx][0]
+        except ValueError:
+            low = raw.lower()
+            if low in ("off","-",""): return ""
+            if low in ("record","record_send","paste"): return low
+        return default
+
     show_advanced = False
     message = ""
     while True:
@@ -1716,14 +1774,15 @@ def _setup_main() -> int:
             message = "advanced shown" if show_advanced else "advanced hidden"
         elif choice == "k":
             binds = values.setdefault("_key_binds", [])
-            print("\n  Keys — choose:")
+            print("\n  Keys — press to capture, then pick tap/hold/toggle one by one:")
             print("   [1] add bind")
             print("   [2] edit bind")
             print("   [3] remove bind")
             print("   [enter] back")
             sub = input("  > ").strip().lower()
             if sub == "1":
-                k = input(" key (evdev name, e.g. rightalt / f13 / pause): ").strip().lower()
+                cap = _capture_key_cli()
+                k = (cap or input(" key (e.g. rightalt/f13) > ").strip().lower())
                 if not k:
                     message = "no key given"
                 else:
@@ -1735,62 +1794,46 @@ def _setup_main() -> int:
                         if any(b.get("key")==k for b in binds):
                             message = f"duplicate key {k!r} — each key once"
                         else:
-                            print(" actions: record (→clipboard), record_send (→paste+Enter), paste (clipboard), empty=off")
-                            print(" toggle overrides tap; hold+tap or hold+toggle are both allowed (idempotent)")
-                            tap = input(" tap  [record / record_send / paste / -] > ").strip().lower()
-                            if tap == "-": tap = ""
-                            hold = input(" hold [record / record_send / paste / -] > ").strip().lower()
-                            if hold == "-": hold = ""
-                            tog = input(" toggle [record / record_send / paste / -] > ").strip().lower()
-                            if tog == "-": tog = ""
-                            thr_raw = input(" hold threshold seconds [0.25] > ").strip() or "0.25"
+                            tap = _pick_action_cli("tap (short press) —", "")
+                            hold = _pick_action_cli("hold (long press) —", "")
+                            tog = _pick_action_cli("toggle (press to start/stop) —", "")
+                            thr_raw = input("  hold threshold [0.25] > ").strip() or "0.25"
                             try:
                                 thr = float(thr_raw)
                                 assert 0 < thr <= 5
                             except Exception:
-                                message = "bad hold_threshold (0..5)"
+                                message = "bad threshold (0..5)"
                             else:
-                                allowed = {"", "record","record_send","paste"}
-                                if tap not in allowed or hold not in allowed or tog not in allowed:
-                                    message = "bad action — use record / record_send / paste / -"
-                                else:
-                                    binds.append({"key":k,"tap":tap,"hold":hold,"toggle":tog,"hold_threshold":thr})
-                                    message = f"added {k}  (tap={tap or '-'} hold={hold or '-'} toggle={tog or '-'})"
+                                binds.append({"key":k,"tap":tap,"hold":hold,"toggle":tog,"hold_threshold":thr})
+                                message = f"added {k}  tap={tap or 'off'} hold={hold or 'off'} toggle={tog or 'off'}"
             elif sub == "2":
                 if not binds:
                     message = "no binds yet — add one first"
                 else:
                     for i,b in enumerate(binds, start=1):
-                        print(f"  {i}) {b['key']}  tap={b.get('tap','') or '-'}  hold={b.get('hold','') or '-'}  toggle={b.get('toggle','') or '-'}  @{b.get('hold_threshold',0.25):g}s")
+                        print(f"  {i}) {_key_label(b['key']):12}  tap={b.get('tap','') or 'off'}  hold={b.get('hold','') or 'off'}  toggle={b.get('toggle','') or 'off'}  @{b.get('hold_threshold',0.25):g}s")
                     raw = input(" edit which > ").strip()
                     try:
-                        idx = int(raw)-1
-                        b = binds[idx]
+                        idx = int(raw)-1; b = binds[idx]
                     except Exception:
                         message = "invalid index"
                     else:
-                        print(f" editing {b['key']} — Enter keeps, '-' clears")
-                        nk = input(f"  key [{b['key']}] > ").strip().lower() or b['key']
+                        print(f" editing {b['key']} — press new key or Enter keeps")
+                        cap = _capture_key_cli()
+                        nk = (cap or input(f"  key [{b['key']}] > ").strip().lower() or b['key'])
                         if nk != b['key'] and any(x.get("key")==nk for x in binds):
                             message = f"duplicate key {nk!r}"
                         else:
-                            try:
-                                _key_code(nk)
-                            except SystemExit as e:
-                                message = str(e)
+                            try: _key_code(nk)
+                            except SystemExit as e: message = str(e)
                             else:
-                                tap = input(f"  tap  [{b.get('tap','') or '-'}] > ").strip().lower()
-                                hold = input(f"  hold [{b.get('hold','') or '-'}] > ").strip().lower()
-                                tog = input(f"  toggle [{b.get('toggle','') or '-'}] > ").strip().lower()
+                                b["tap"] = _pick_action_cli(f"tap (was {b.get('tap','') or 'off'}) —", b.get('tap',''))
+                                b["hold"] = _pick_action_cli(f"hold (was {b.get('hold','') or 'off'}) —", b.get('hold',''))
+                                b["toggle"] = _pick_action_cli(f"toggle (was {b.get('toggle','') or 'off'}) —", b.get('toggle',''))
                                 thr_raw = input(f"  threshold [{b.get('hold_threshold',0.25):g}] > ").strip()
-                                if tap != "": b["tap"] = "" if tap == "-" else tap
-                                if hold != "": b["hold"] = "" if hold == "-" else hold
-                                if tog != "": b["toggle"] = "" if tog == "-" else tog
                                 if thr_raw:
-                                    try:
-                                        b["hold_threshold"] = float(thr_raw)
-                                    except Exception:
-                                        message = "bad threshold, kept old"
+                                    try: b["hold_threshold"] = float(thr_raw)
+                                    except Exception: message = "bad threshold, kept old"
                                 b["key"] = nk
                                 if "bad threshold" not in (message or ""):
                                     message = f"updated {nk}"
@@ -1933,43 +1976,160 @@ def _tui_main() -> int:
             except curses.error: pass
         return s if s else default
 
+    def _capture_key(stdscr_) -> str | None:
+        # Wait for next evdev press and return its key name; fallback to curses if no device
+        hint = "Press the key to bind  (Esc cancels)…"
+        h_, w_ = stdscr_.getmaxyx()
+        try:
+            stdscr_.move(h_-1, 0); stdscr_.clrtoeol()
+            stdscr_.addnstr(h_-1, 0, hint, w_-1)
+            stdscr_.noutrefresh(); curses.doupdate()
+        except curses.error:
+            pass
+        try:
+            import evdev
+            import select
+            wanted = set()
+            devs = []
+            for path in evdev.list_devices():
+                try:
+                    d = evdev.InputDevice(path)
+                    caps = d.capabilities(verbose=False)
+                    keys = caps.get(evdev.ecodes.EV_KEY, [])
+                    if keys:
+                        devs.append(d)
+                except Exception:
+                    continue
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                r, _, _ = select.select(devs, [], [], 0.1)
+                for d in r:
+                    try:
+                        for ev in d.read():
+                            if ev.type == evdev.ecodes.EV_KEY and ev.value == 1:
+                                name = evdev.ecodes.keys.get(ev.code) or evdev.ecodes.KEY[ev.code] if ev.code in getattr(evdev.ecodes, "KEY", {}) else None
+                                # ecodes.keys or KEY maps code -> "KEY_xxx"
+                                raw = None
+                                if hasattr(evdev.ecodes, "KEY"):
+                                    raw = evdev.ecodes.KEY.get(ev.code)
+                                if raw is None:
+                                    # fallback via attr scan
+                                    for attr in dir(evdev.ecodes):
+                                        if attr.startswith("KEY_"):
+                                            if getattr(evdev.ecodes, attr) == ev.code:
+                                                raw = attr
+                                                break
+                                if raw and raw.startswith("KEY_"):
+                                    name = raw[4:].lower()
+                                else:
+                                    name = str(ev.code)
+                                return name
+                    except Exception:
+                        pass
+                # also poll curses for Esc
+                try:
+                    stdscr_.nodelay(True)
+                    ch = stdscr_.getch()
+                    stdscr_.nodelay(False)
+                    if ch == 27:
+                        return None
+                    if ch != -1:
+                        stdscr_.nodelay(False)
+                        # ignore
+                        pass
+                except curses.error:
+                    pass
+                try:
+                    stdscr_.nodelay(False)
+                except curses.error:
+                    pass
+            stdscr_.nodelay(False)
+            return None
+        except Exception:
+            try:
+                stdscr_.nodelay(False)
+            except curses.error:
+                pass
+            # fallback: ask via curses key name
+            try:
+                stdscr_.move(h_-1, 0); stdscr_.clrtoeol()
+                stdscr_.addnstr(h_-1, 0, "evdev unavailable — type key name: ", w_-1)
+                stdscr_.noutrefresh(); curses.doupdate()
+            except curses.error:
+                pass
+            return None
+
+    def _choose_action(stdscr_, prompt, current=""):
+        items = [("record", "copy only"), ("record_send", "copy+paste+Enter"), ("paste", "paste clipboard"), ("", "off")]
+        sel = 0
+        for i,(v,_) in enumerate(items):
+            if v == current:
+                sel = i; break
+        while True:
+            h_, w_ = stdscr_.getmaxyx()
+            try:
+                stdscr_.move(h_-1, 0); stdscr_.clrtoeol()
+                line = prompt + "  "
+                for i,(v,lbl) in enumerate(items):
+                    tag = f"[{v or 'off'}:{lbl}]"
+                    if i == sel:
+                        tag = f"[{v or 'off'}]"
+                    line += ("▶" if i==sel else " ") + tag + " "
+                stdscr_.addnstr(h_-1, 0, line[:w-1], w_-1)
+                stdscr_.addnstr(h_-1, max(0,w-28), " ↑↓ choose · Enter ok · Esc cancel", 28)
+                stdscr_.noutrefresh(); curses.doupdate()
+            except curses.error:
+                pass
+            ch = stdscr_.getch()
+            if ch in (curses.KEY_UP, curses.KEY_LEFT):
+                sel = (sel-1) % len(items)
+            elif ch in (curses.KEY_DOWN, curses.KEY_RIGHT, 9):  # Tab
+                sel = (sel+1) % len(items)
+            elif ch in (10,13,curses.KEY_ENTER, ord(" ")):
+                return items[sel][0]
+            elif ch == 27:
+                return current
+
     def _edit_keys_flow(stdscr_) -> None:
         binds = values.setdefault("_key_binds", [])
-        ch = _prompt_line(stdscr_, "Keys: [1] add  [2] edit  [3] remove  [Enter] back", "")
+        # Guided page: header
+        h_, w_ = stdscr_.getmaxyx()
+        ch = _prompt_line(stdscr_, "Keys  [1] add  [2] edit  [3] remove  [Enter] back", "")
         if ch == "1":
-            k = _prompt_line(stdscr_, "key (e.g. rightalt/f13)", "").strip().lower()
-            if not k: return
-            try: _key_code(k)
+            if len(binds) >= 3:
+                return
+            name = _capture_key(stdscr_)
+            if not name:
+                name = _prompt_line(stdscr_, "key (e.g. rightalt/f13)", "").strip().lower()
+                if not name: return
+            try: _key_code(name)
             except SystemExit: return
-            if any(b.get("key")==k for b in binds): return
-            tap = _prompt_line(stdscr_, "tap (record/record_send/paste/-)", "").strip().lower()
-            if tap == "-": tap=""
-            hold = _prompt_line(stdscr_, "hold (record/record_send/paste/-)", "").strip().lower()
-            if hold == "-": hold=""
-            tog = _prompt_line(stdscr_, "toggle (record/record_send/paste/-)", "").strip().lower()
-            if tog == "-": tog=""
+            if any(b.get("key")==name for b in binds): return
+            tap = _choose_action(stdscr_, "tap (short press) —", "")
+            hold = _choose_action(stdscr_, "hold (long press) —", "")
+            tog = _choose_action(stdscr_, "toggle (press to start/stop, overrides tap) —", "")
             thr_raw = _prompt_line(stdscr_, "hold threshold seconds", "0.25").strip() or "0.25"
             try: thr = float(thr_raw); assert 0 < thr <= 5
             except Exception: return
-            if tap not in _ALLOWED_ACTIONS or hold not in _ALLOWED_ACTIONS or tog not in _ALLOWED_ACTIONS: return
-            binds.append({"key":k,"tap":tap,"hold":hold,"toggle":tog,"hold_threshold":thr})
+            binds.append({"key":name,"tap":tap,"hold":hold,"toggle":tog,"hold_threshold":thr})
         elif ch == "2":
             if not binds: return
             lst = ", ".join(f"{i+1}:{b['key']}" for i,b in enumerate(binds))
             raw = _prompt_line(stdscr_, f"edit which ({lst})", "")
             try: idx = int(raw)-1; b = binds[idx]
             except Exception: return
-            nk = _prompt_line(stdscr_, f"key [{b['key']}]", b['key']).strip().lower() or b['key']
+            rec = _capture_key(stdscr_)
+            nk = rec if rec else _prompt_line(stdscr_, f"key [{b['key']}] — press key or Enter keeps", b['key']).strip().lower() or b['key']
             if nk != b['key'] and any(x.get("key")==nk for x in binds): return
             try: _key_code(nk)
             except SystemExit: return
-            tap = _prompt_line(stdscr_, f"tap [{b.get('tap','') or '-'}]", "").strip().lower()
-            hold = _prompt_line(stdscr_, f"hold [{b.get('hold','') or '-'}]", "").strip().lower()
-            tog = _prompt_line(stdscr_, f"toggle [{b.get('toggle','') or '-'}]", "").strip().lower()
+            tap = _choose_action(stdscr_, f"tap [{b.get('tap','') or 'off'}] →", b.get('tap',''))
+            b["tap"] = tap
+            hold = _choose_action(stdscr_, f"hold [{b.get('hold','') or 'off'}] →", b.get('hold',''))
+            b["hold"] = hold
+            tog = _choose_action(stdscr_, f"toggle [{b.get('toggle','') or 'off'}] →", b.get('toggle',''))
+            b["toggle"] = tog
             thr_raw = _prompt_line(stdscr_, f"threshold [{b.get('hold_threshold',0.25):g}]", "").strip()
-            if tap != "": b["tap"] = "" if tap=="-" else tap
-            if hold != "": b["hold"] = "" if hold=="-" else hold
-            if tog != "": b["toggle"] = "" if tog=="-" else tog
             if thr_raw:
                 try: b["hold_threshold"] = float(thr_raw)
                 except Exception: pass
@@ -1977,7 +2137,7 @@ def _tui_main() -> int:
         elif ch == "3":
             if not binds: return
             lst = ", ".join(f"{i+1}:{b['key']}" for i,b in enumerate(binds))
-            raw = _prompt_line(stdscr_, f"remove which ({lst})", "").strip()
+            raw = _prompt_line(stdscr_, f"remove which ({lst})", "")
             try: idx = int(raw)-1; binds.pop(idx)
             except Exception: return
 
