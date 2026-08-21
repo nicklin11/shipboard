@@ -215,7 +215,12 @@ _HOLD_THRESHOLD_DEFAULT = 0.25
 
 def _normalize_action(v) -> str:
     v = str(v or "").strip().lower()
-    return v if v in _ALLOWED_ACTIONS else ""
+    if v == "":
+        return ""
+    if v in _ALLOWED_ACTIONS:
+        return v
+    # invalid non-empty -> keep raw lower for parser to error, but also return "" for UI previews
+    return v
 
 def _parse_key_bindings(cfg: dict) -> list:
     raw = cfg.get("key_bind")
@@ -231,18 +236,24 @@ def _parse_key_bindings(cfg: dict) -> list:
             key = str(entry.get("key", "")).strip().lower()
             if not key:
                 raise SystemExit(f"shipboard: [[key_bind]] #{idx+1} missing 'key'")
-            tap = _normalize_action(entry.get("tap", ""))
-            hold = _normalize_action(entry.get("hold", ""))
-            toggle = _normalize_action(entry.get("toggle", ""))
+            # validate actions strictly: empty = off, else must be allowed
+            def _strict_action(raw):
+                s = str(raw or "").strip().lower()
+                if s == "":
+                    return ""
+                if s in _ALLOWED_ACTIONS:
+                    return s
+                raise SystemExit(f"shipboard: [[key_bind]] #{idx+1} bad action {raw!r} (allowed: record/record_send/paste)")
+            tap = _strict_action(entry.get("tap", ""))
+            hold = _strict_action(entry.get("hold", ""))
+            toggle = _strict_action(entry.get("toggle", ""))
             try:
                 thr = float(entry.get("hold_threshold", _HOLD_THRESHOLD_DEFAULT))
             except Exception:
                 raise SystemExit(f"shipboard: [[key_bind]] #{idx+1} bad hold_threshold")
             if thr <= 0 or thr > 5:
                 raise SystemExit(f"shipboard: [[key_bind]] #{idx+1} hold_threshold out of range (0..5)")
-            if tap not in _ALLOWED_ACTIONS or hold not in _ALLOWED_ACTIONS or toggle not in _ALLOWED_ACTIONS:
-                raise SystemExit(f"shipboard: [[key_bind]] #{idx+1} bad action (allowed: record/record_send/paste)")
-            # toggle overrides tap — warn but allow
+            # toggle overrides tap — warn but allow (hold+tap / hold+toggle idempotent: short release=tap/toggle, long=hold)
             bindings.append({"key": key, "tap": tap, "hold": hold, "toggle": toggle, "hold_threshold": thr})
     else:
         bindings = []
@@ -1178,23 +1189,13 @@ class _Daemon:
             self._pending_hold[code] = time.monotonic() + thr
             return
         if hold and not tap:
-            # only hold: wait for threshold then start; if quick release ignored? but allow tap threshold firing
+            # only hold: wait for threshold then start; short press ignored (idempotent)
             self._key_down[code] = time.monotonic()
             self._pending_hold[code] = time.monotonic() + thr
             return
         if tap and not hold:
-            # only tap: short press-release -> tap, but for record we need toggle-like? tap starts toggle recording
-            # we treat tap as toggle-like: first press starts, next press stops
-            if not self.recording:
-                # if currently recording same key tap, this second press finishes
-                # detect by checking if recording key matches
-                pass
-            if self.recording and self._rec_key == key and self._rec_mode == "tap":
-                self._finish_record()
-                return
-            # need to wait for release to fire tap? fire on release for paste, but for record start on press
-            # For simplicity fire on press for record, on release for paste? Choose release for all tap to get hold vs tap idempotent
-            # So defer to release
+            # only tap: defer to release (release starts or stops recording for record, or pastes for paste)
+            # idempotent with hold: hold+tap handled above, this is tap-only
             self._key_down[code] = time.monotonic()
             return
         # fallback: nothing
@@ -1233,17 +1234,12 @@ class _Daemon:
             # idempotent: do nothing on short tap when only hold is set
             return
         if tap and not hold:
-            # only tap: release fires tap
-            # if tap is record, this should start or stop
+            # only tap: release fires tap — tap as toggle (first release starts, second release stops)
             if self.recording and self._rec_key == key and self._rec_mode == "tap":
                 self._finish_record()
                 return
             if not self.recording:
                 self._do_action(tap, key, "tap")
-                # if tap just started a toggle-like recording, keep rec_mode tap
-                # already set via _do_action
-                if self.recording:
-                    self._rec_mode = "tap"
             return
 
     # (legacy shims removed — see _on_key_press/_on_key_release)
