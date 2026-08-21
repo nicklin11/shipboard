@@ -1483,56 +1483,52 @@ def _config_main() -> int:
 # TUI setup (stdlib curses, no dependencies)
 # --------------------------------------------------------------------------
 _SETUP_FIELDS = [
-    # STT
-    ("whisper_url",        "STT server URL (wake/tailnet proxy)", str, "STT"),
-    ("whisper_health_url", "Health URL",                          str, "STT"),
-    ("whisper_container",  "Docker container to wake",           str, "STT"),
-    ("whisper_language",   "Whisper language (auto/ru/en/...)",  str, "STT"),
-    # Recording
-    ("record_target",      "Record source (default=system)",    str, "Recording"),
-    ("record_rate",        "Recording sample rate",             int, "Recording"),
-    ("record_channels",    "Recording channels",                int, "Recording"),
-    # Send
-    ("paste_combo",        "Paste shortcut (uinput combo)",      str, "Send"),
-    ("send_enter",         "Enter after paste (global default)", bool, "Send"),
-    ("scroll_send_enter",  "Scroll Lock tap: Enter after paste", bool, "Send"),
-    ("both_send_enter",    "Both keys: Enter after paste",       bool, "Send"),
-    # Recording
-    ("max_hold",           "Max hold, seconds (stuck guard)",    float, "Recording"),
-    ("min_recording",      "Min recording, seconds",             float, "Recording"),
-    # Send
-    ("grace",              "Both-keys window, seconds",          float, "Send"),
-    # Keys
-    ("key_record",         "Record key (evdev name, e.g. pause)", str, "Keys"),
-    ("key_send",           "Send key (evdev name, e.g. scrolllock)", str, "Keys"),
-    ("key_record_send",    "Record+send key (evdev name, optional)", str, "Keys"),
-    ("key_record_mode",    "Record key mode (hold/toggle)",       str, "Keys"),
-    # Send
-    ("normalize",          "Dictation symbols (слэш/дэш/...) ",  bool, "Send"),
-    # STT
-    ("prompt",             "Initial whisper prompt (optional)",  str, "STT"),
+    # ── Essential (most people only touch these) ──
+    ("paste_combo",        "Paste shortcut",                      str, "Essentials"),
+    ("send_enter",         "Press Enter after paste",             bool, "Essentials"),
+    ("normalize",          "Smart symbols  (тильда слэш -> ~/) ", bool, "Essentials"),
+    ("prompt",             "Whisper prompt  (domain words, optional)", str, "Essentials"),
+    ("whisper_language",   "Language  (auto / ru / en / ...)",    str, "Essentials"),
+    # ── Recording (rarely tweaked) ──
+    ("max_hold",           "Max hold  (stuck guard, seconds)",    float, "Recording"),
+    ("min_recording",      "Ignore shorter than  (seconds)",      float, "Recording"),
+    ("record_target",      "Mic source  (default = system)",      str, "Recording"),
+    # ── Keys — legacy, now hidden unless you need them (prefer [[key_bind]] via Keys screen) ──
+    ("key_record",         "Record key  (legacy, prefer Keys screen)", str, "Keys (legacy)"),
+    ("key_send",           "Send key  (legacy)",                  str, "Keys (legacy)"),
+    ("key_record_send",    "Record+send key  (legacy, optional)", str, "Keys (legacy)"),
+    ("key_record_mode",    "Record mode  (hold / toggle, legacy)", str, "Keys (legacy)"),
+    ("grace",              "Both-keys window  (legacy, seconds)",  float, "Keys (legacy)"),
+    ("scroll_send_enter",  "Scroll-key Enter  (legacy)",          bool, "Keys (legacy)"),
+    ("both_send_enter",    "Both-keys Enter  (legacy)",           bool, "Keys (legacy)"),
+    # ── Behind "Advanced" ──
+    ("whisper_url",        "STT server URL",                      str, "Advanced"),
+    ("whisper_health_url", "Health URL",                          str, "Advanced"),
+    ("whisper_container",  "Docker container to wake",            str, "Advanced"),
+    ("record_rate",        "Sample rate",                         int, "Advanced"),
+    ("record_channels",    "Channels",                            int, "Advanced"),
     # Wake words
-    ("wakeword_enabled",   "Wake word listener (engine WIP)",    bool, "Wake words"),
-    ("wakeword_cooldown",  "Wake word cooldown, seconds",        float, "Wake words"),
-    ("wakeword_grace",     "Wake word grace, seconds",           float, "Wake words"),
-    ("wakeword_stop_silence", "Wake word stop on silence, s",    float, "Wake words"),
-    ("wakeword_action",    "Wake word action (record/record_send)", str, "Wake words"),
-    ("wakeword_silence_level", "Wake word silence RMS level",    float, "Wake words"),
-    ("wakeword_sherpa_score", "Sherpa KWS score boost (sensitivity)", float, "Wake words"),
-    ("wakeword_sherpa_threshold", "Sherpa KWS threshold (lower=easier)", float, "Wake words"),
-    ("kws_threads",        "Sherpa KWS onnxruntime threads",     int, "Wake words"),
-    ("wakeword_record",    "Wake word: record (copy only)",        str, "Wake words"),
-    ("wakeword_send",      "Wake word: record+send (paste+Enter)", str, "Wake words"),
-    ("wakeword_paste",     "Wake word: paste (clipboard)",         str, "Wake words"),
-    ("wakeword_debug",     "Wake word mic level log",             bool, "Wake words"),
+    ("wakeword_enabled",   "Wake word listener (engine WIP)",    bool, "Advanced"),
+    ("wakeword_cooldown",  "Wake word cooldown, seconds",        float, "Advanced"),
+    ("wakeword_grace",     "Wake word grace, seconds",           float, "Advanced"),
+    ("wakeword_stop_silence", "Wake word stop on silence, s",    float, "Advanced"),
+    ("wakeword_action",    "Wake word action (record/record_send)", str, "Advanced"),
+    ("wakeword_silence_level", "Wake word silence RMS level",    float, "Advanced"),
+    ("wakeword_sherpa_score", "Sherpa KWS score boost (sensitivity)", float, "Advanced"),
+    ("wakeword_sherpa_threshold", "Sherpa KWS threshold (lower=easier)", float, "Advanced"),
+    ("kws_threads",        "Sherpa KWS onnxruntime threads",     int, "Advanced"),
+    ("wakeword_record",    "Wake word: record (copy only)",        str, "Advanced"),
+    ("wakeword_send",      "Wake word: record+send (paste+Enter)", str, "Advanced"),
+    ("wakeword_paste",     "Wake word: paste (clipboard)",         str, "Advanced"),
+    ("wakeword_debug",     "Wake word mic level log",             bool, "Advanced"),
     # Platform
-    ("keep_audio_dir",     "Keep recordings in dir ('' = delete)", str, "Platform"),
-    ("dry_run",            "Dry run (log actions, do nothing)",    bool, "Platform"),
-    ("inject_backend",     "Key inject backend (auto/uinput/wtype)", str, "Platform"),
-    ("notify_backend",     "Notify backend (auto/notify-send/...)", str, "Platform"),
-    ("clipboard_backend",  "Clipboard backend (auto/wl-copy/xclip)", str, "Platform"),
-    ("record_backend",     "Record backend (auto/pw-record/ffmpeg)", str, "Platform"),
-    ("input_device_glob",  "Input device glob (evdev, e.g. event*)", str, "Platform"),
+    ("keep_audio_dir",     "Keep recordings in dir ('' = delete)", str, "Advanced"),
+    ("dry_run",            "Dry run (log actions, do nothing)",    bool, "Advanced"),
+    ("inject_backend",     "Key inject backend (auto/uinput/wtype)", str, "Advanced"),
+    ("notify_backend",     "Notify backend (auto/notify-send/...)", str, "Advanced"),
+    ("clipboard_backend",  "Clipboard backend (auto/wl-copy/xclip)", str, "Advanced"),
+    ("record_backend",     "Record backend (auto/pw-record/ffmpeg)", str, "Advanced"),
+    ("input_device_glob",  "Input device glob (evdev, e.g. event*)", str, "Advanced"),
 ]
 
 
@@ -1733,13 +1729,51 @@ def _setup_main() -> int:
     values = _field_defaults()
     values.update(_CFG)
     _setup_prefill(values)
+    show_advanced = False
     message = ""
     while True:
         print("\n" + "─" * 60)
-        print(f" shipboard setup — {DEFAULT_CONFIG_PATH}")
+        print(f" shipboard setup — {DEFAULT_CONFIG_PATH}   (daemon: {'on' if _daemon_running() else 'off'})")
         print("─" * 60)
+        # ── Keys quick-card (always on top — this is what people tweak most) ──
+        binds = values.get("_key_binds") or []
+        if binds:
+            print("  Keys  (tap = short press, hold = long press, toggle = press to start/stop)")
+            for idx, b in enumerate(binds, start=1):
+                tap = b.get("tap",""); hold = b.get("hold",""); tog = b.get("toggle","")
+                thr = b.get("hold_threshold", 0.25)
+                parts = []
+                if tog: parts.append(f"toggle={tog}")
+                if hold: parts.append(f"hold {hold} @ {thr:g}s")
+                if tap: parts.append(f"tap {tap}")
+                hint = "  (toggle overrides tap)" if tog and (tap or hold) else ""
+                print(f"   • {_key_label(b.get('key','')):<12}  {'  ·  '.join(parts) if parts else '(off)'}{hint}")
+        else:
+            print("  Keys  (none yet — add your first binding)")
+            # show legacy hint if present
+            if values.get("key_record") or values.get("key_send"):
+                lr = _key_label(values.get("key_record","")); ls = _key_label(values.get("key_send",""))
+                print(f"      legacy: {lr} / {ls}  (add a Keys bind to override)")
+        print("     [k] keys: add / edit / remove")
+        # ── Essentials + Recording + collapsed sections ──
         last_section = None
         for i, (key, label, conv, section) in enumerate(_SETUP_FIELDS, start=1):
+            is_adv = (section == "Advanced")
+            is_legacy_keys = (section == "Keys (legacy)")
+            if is_adv or is_legacy_keys:
+                if is_adv and not show_advanced and section != last_section:
+                    # first advanced field — render a collapsed row instead of all fields
+                    adv_count = sum(1 for _,_,_,s in _SETUP_FIELDS if s == "Advanced")
+                    print(f"\n  … Advanced  ({adv_count} settings)  [a] show / hide")
+                    last_section = section
+                    continue
+                elif is_legacy_keys and not show_advanced and section != last_section:
+                    print(f"\n  … Keys (legacy)  [a] show")
+                    last_section = section
+                    continue
+                elif (is_adv or is_legacy_keys) and not show_advanced:
+                    last_section = section
+                    continue
             if section != last_section:
                 print(f"\n  == {section} ==")
                 last_section = section
@@ -1760,8 +1794,8 @@ def _setup_main() -> int:
         else:
             print("  -- key -> behaviour: (none) [a] add bind --")
         print("─" * 60)
-        print(" [num] edit field · [a/e/d] binds · [s] save · [t] test STT · [p] compositor binds"
-              " · [r] restart daemon · [q] quit")
+        print(" [num] edit setting  ·  [k] keys  ·  [a] advanced  ·  [s] save  ·  [t] test STT  ·  [p] binds"
+              "  ·  [r] restart  ·  [q] quit")
         if message:
             print(f" {message}")
         try:
@@ -1773,85 +1807,103 @@ def _setup_main() -> int:
         if choice in ("q", "quit", "exit"):
             return 0
         if choice == "a":
-            k = input(" key (evdev name, e.g. rightalt/f13): ").strip().lower()
-            if not k:
-                message = "no key given"
-            else:
-                try:
-                    _key_code(k)
-                except SystemExit as e:
-                    message = str(e)
+            show_advanced = not show_advanced
+            message = "advanced shown" if show_advanced else "advanced hidden"
+        elif choice == "k":
+            binds = values.setdefault("_key_binds", [])
+            print("\n  Keys — choose:")
+            print("   [1] add bind")
+            print("   [2] edit bind")
+            print("   [3] remove bind")
+            print("   [enter] back")
+            sub = input("  > ").strip().lower()
+            if sub == "1":
+                k = input(" key (evdev name, e.g. rightalt / f13 / pause): ").strip().lower()
+                if not k:
+                    message = "no key given"
                 else:
-                    if any(b.get("key")==k for b in values.get("_key_binds",[])):
-                        message = f"duplicate key {k!r}"
+                    try:
+                        _key_code(k)
+                    except SystemExit as e:
+                        message = str(e)
                     else:
-                        tap = input(" tap action (record/record_send/paste or empty): ").strip().lower() or ""
-                        hold = input(" hold action (record/record_send/paste or empty): ").strip().lower() or ""
-                        tog = input(" toggle action (record/record_send/paste or empty): ").strip().lower() or ""
-                        thr_raw = input(" hold_threshold seconds [0.25]: ").strip() or "0.25"
-                        try:
-                            thr = float(thr_raw)
-                            assert 0 < thr <= 5
-                        except Exception:
-                            message = "bad hold_threshold"
+                        if any(b.get("key")==k for b in binds):
+                            message = f"duplicate key {k!r} — each key once"
                         else:
-                            allowed = {"", "record","record_send","paste"}
-                            if tap not in allowed or hold not in allowed or tog not in allowed:
-                                message = "bad action (allowed: record/record_send/paste)"
+                            print(" actions: record (→clipboard), record_send (→paste+Enter), paste (clipboard), empty=off")
+                            print(" toggle overrides tap; hold+tap or hold+toggle are both allowed (idempotent)")
+                            tap = input(" tap  [record / record_send / paste / -] > ").strip().lower()
+                            if tap == "-": tap = ""
+                            hold = input(" hold [record / record_send / paste / -] > ").strip().lower()
+                            if hold == "-": hold = ""
+                            tog = input(" toggle [record / record_send / paste / -] > ").strip().lower()
+                            if tog == "-": tog = ""
+                            thr_raw = input(" hold threshold seconds [0.25] > ").strip() or "0.25"
+                            try:
+                                thr = float(thr_raw)
+                                assert 0 < thr <= 5
+                            except Exception:
+                                message = "bad hold_threshold (0..5)"
                             else:
-                                values.setdefault("_key_binds", []).append({"key":k,"tap":tap,"hold":hold,"toggle":tog,"hold_threshold":thr})
-                                message = f"added {k}"
-            # continue loop
-        elif choice == "d":
-            binds = values.get("_key_binds", [])
-            if not binds:
-                message = "no binds"
-            else:
-                raw = input(f" delete which 1..{len(binds)} > ").strip()
-                try:
-                    idx = int(raw)-1
-                    b = binds.pop(idx)
-                    message = f"deleted {b['key']}"
-                except Exception:
-                    message = "invalid index"
-        elif choice == "e":
-            binds = values.get("_key_binds", [])
-            if not binds:
-                message = "no binds"
-            else:
-                raw = input(f" edit which 1..{len(binds)} > ").strip()
-                try:
-                    idx = int(raw)-1
-                    b = binds[idx]
-                except Exception:
-                    message = "invalid index"
+                                allowed = {"", "record","record_send","paste"}
+                                if tap not in allowed or hold not in allowed or tog not in allowed:
+                                    message = "bad action — use record / record_send / paste / -"
+                                else:
+                                    binds.append({"key":k,"tap":tap,"hold":hold,"toggle":tog,"hold_threshold":thr})
+                                    message = f"added {k}  (tap={tap or '-'} hold={hold or '-'} toggle={tog or '-'})"
+            elif sub == "2":
+                if not binds:
+                    message = "no binds yet — add one first"
                 else:
-                    print(f" editing {b['key']} (Enter keeps)")
-                    nk = input(f"  key [{b['key']}] > ").strip().lower() or b['key']
-                    if nk != b['key'] and any(x.get("key")==nk for x in binds):
-                        message = f"duplicate key {nk!r}"
+                    for i,b in enumerate(binds, start=1):
+                        print(f"  {i}) {b['key']}  tap={b.get('tap','') or '-'}  hold={b.get('hold','') or '-'}  toggle={b.get('toggle','') or '-'}  @{b.get('hold_threshold',0.25):g}s")
+                    raw = input(" edit which > ").strip()
+                    try:
+                        idx = int(raw)-1
+                        b = binds[idx]
+                    except Exception:
+                        message = "invalid index"
                     else:
-                        try:
-                            _key_code(nk)
-                        except SystemExit as e:
-                            message = str(e)
+                        print(f" editing {b['key']} — Enter keeps, '-' clears")
+                        nk = input(f"  key [{b['key']}] > ").strip().lower() or b['key']
+                        if nk != b['key'] and any(x.get("key")==nk for x in binds):
+                            message = f"duplicate key {nk!r}"
                         else:
-                            tap = input(f"  tap [{b.get('tap','')}] > ").strip().lower()
-                            hold = input(f"  hold [{b.get('hold','')}] > ").strip().lower()
-                            tog = input(f"  toggle [{b.get('toggle','')}] > ").strip().lower()
-                            thr_raw = input(f"  hold_threshold [{b.get('hold_threshold',0.25):g}] > ").strip()
-                            if tap != "": b["tap"] = tap
-                            if hold != "": b["hold"] = hold
-                            if tog != "": b["toggle"] = tog
-                            if thr_raw:
-                                try:
-                                    b["hold_threshold"] = float(thr_raw)
-                                except Exception:
-                                    message = "bad threshold, kept old"
-                                    # still update key
-                            b["key"] = nk
-                            if "bad threshold" not in (message or ""):
-                                message = f"updated {nk}"
+                            try:
+                                _key_code(nk)
+                            except SystemExit as e:
+                                message = str(e)
+                            else:
+                                tap = input(f"  tap  [{b.get('tap','') or '-'}] > ").strip().lower()
+                                hold = input(f"  hold [{b.get('hold','') or '-'}] > ").strip().lower()
+                                tog = input(f"  toggle [{b.get('toggle','') or '-'}] > ").strip().lower()
+                                thr_raw = input(f"  threshold [{b.get('hold_threshold',0.25):g}] > ").strip()
+                                if tap != "": b["tap"] = "" if tap == "-" else tap
+                                if hold != "": b["hold"] = "" if hold == "-" else hold
+                                if tog != "": b["toggle"] = "" if tog == "-" else tog
+                                if thr_raw:
+                                    try:
+                                        b["hold_threshold"] = float(thr_raw)
+                                    except Exception:
+                                        message = "bad threshold, kept old"
+                                b["key"] = nk
+                                if "bad threshold" not in (message or ""):
+                                    message = f"updated {nk}"
+            elif sub == "3":
+                if not binds:
+                    message = "no binds"
+                else:
+                    for i,b in enumerate(binds, start=1):
+                        print(f"  {i}) {b['key']}")
+                    raw = input(" remove which > ").strip()
+                    try:
+                        idx = int(raw)-1
+                        b = binds.pop(idx)
+                        message = f"removed {b['key']}"
+                    except Exception:
+                        message = "invalid index"
+            else:
+                message = ""
         elif choice == "s":
             _save_config_file(values)
             message = f"saved to {DEFAULT_CONFIG_PATH} — restart the daemon to apply (r)"
