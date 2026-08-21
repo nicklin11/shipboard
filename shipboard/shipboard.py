@@ -2017,22 +2017,17 @@ def _tui_main() -> int:
                     try:
                         for ev in d.read():
                             if ev.type == evdev.ecodes.EV_KEY and ev.value == 1:
-                                name = evdev.ecodes.keys.get(ev.code) or evdev.ecodes.KEY[ev.code] if ev.code in getattr(evdev.ecodes, "KEY", {}) else None
-                                # ecodes.keys or KEY maps code -> "KEY_xxx"
                                 raw = None
-                                if hasattr(evdev.ecodes, "KEY"):
-                                    raw = evdev.ecodes.KEY.get(ev.code)
+                                name_to_code = getattr(evdev.ecodes, "KEY", {})
+                                rev = {v: k for k, v in name_to_code.items()}
+                                raw = rev.get(ev.code)
                                 if raw is None:
-                                    # fallback via attr scan
+                                    # fallback: scan KEY_* attributes
                                     for attr in dir(evdev.ecodes):
-                                        if attr.startswith("KEY_"):
-                                            if getattr(evdev.ecodes, attr) == ev.code:
-                                                raw = attr
-                                                break
-                                if raw and raw.startswith("KEY_"):
-                                    name = raw[4:].lower()
-                                else:
-                                    name = str(ev.code)
+                                        if attr.startswith("KEY_") and getattr(evdev.ecodes, attr) == ev.code:
+                                            raw = attr
+                                            break
+                                name = raw[4:].lower() if raw and raw.startswith("KEY_") else str(ev.code)
                                 return name
                     except Exception:
                         pass
@@ -2101,34 +2096,142 @@ def _tui_main() -> int:
                 return current
 
     def _edit_keys_flow(stdscr_) -> None:
+        """Keys page: list of bindings; Enter opens a per-bind editor where each
+        option (key / tap / hold / hold-delay / toggle) is its own line."""
         binds = values.setdefault("_key_binds", [])
+
+        def _edit_bind(stdscr__, bind: dict) -> None:
+            """Per-bind editor — one option per line, each edited separately."""
+            rows = [
+                ("Key",             "key"),
+                ("Tap (short)",     "tap"),
+                ("Hold (long)",     "hold"),
+                ("Hold delay (s)",  "hold_threshold"),
+                ("Toggle",          "toggle"),
+            ]
+            sel = 0
+            while True:
+                h___, w___ = stdscr__.getmaxyx()
+                try:
+                    stdscr__.erase()
+                    title = f" Bind: {_key_label(bind['key'])} "
+                    stdscr__.addnstr(0, 0, title + "─" * max(0, w___ - len(title)),
+                                     w___ - 1, curses.A_REVERSE)
+                    for i, (label, field) in enumerate(rows):
+                        if field == "key":
+                            cur = _key_label(bind["key"])
+                            hint = "press key to re-bind"
+                        elif field == "hold_threshold":
+                            cur = f"{bind.get('hold_threshold', 0.25):g}s"
+                            hint = "seconds 0–5"
+                        else:
+                            cur = bind.get(field, "") or "off"
+                            hint = "record / record_send / paste / off"
+                        line = f" {i+1}. {label:<18} {cur:<14}  [{hint}]"
+                        attrs = curses.A_REVERSE if i == sel else 0
+                        stdscr__.addnstr(2 + i, 1, line[:w___ - 2], w___ - 2, attrs)
+                    note = "tap = short press  ·  hold = long press  ·  toggle = press to start/stop (overrides tap)"
+                    try:
+                        stdscr__.addnstr(2 + len(rows) + 1, 1, note, w___ - 2, curses.A_DIM)
+                    except curses.error:
+                        pass
+                    hint = " ↑/↓ move · Enter edit line · Esc back"
+                    stdscr__.addnstr(h___ - 1, 0, hint, w___ - 1)
+                    stdscr__.noutrefresh()
+                    curses.doupdate()
+                except curses.error:
+                    pass
+                ch = stdscr__.getch()
+                if ch in (27, ord("q"), ord("Q")):
+                    return
+                elif ch == curses.KEY_UP:
+                    sel = (sel - 1) % len(rows)
+                elif ch == curses.KEY_DOWN:
+                    sel = (sel + 1) % len(rows)
+                elif ch in (10, 13, curses.KEY_ENTER, ord(" ")):
+                    field = rows[sel][1]
+                    if field == "key":
+                        rec = _capture_key(stdscr__)
+                        if rec:
+                            if any(x is not bind and x.get("key") == rec for x in binds):
+                                continue
+                            try:
+                                _key_code(rec)
+                                bind["key"] = rec
+                            except SystemExit:
+                                pass
+                        else:
+                            nk = _prompt_line(stdscr__, "key name", bind["key"]).strip().lower() or bind["key"]
+                            if nk != bind["key"] and any(x is not bind and x.get("key") == nk for x in binds):
+                                continue
+                            try:
+                                _key_code(nk)
+                                bind["key"] = nk
+                            except SystemExit:
+                                pass
+                    elif field == "hold_threshold":
+                        raw = _prompt_line(stdscr__, "hold delay seconds (0–5)",
+                                           f"{bind.get('hold_threshold', 0.25):g}").strip()
+                        try:
+                            v = float(raw)
+                            assert 0 < v <= 5
+                            bind["hold_threshold"] = v
+                        except Exception:
+                            pass
+                    else:  # tap / hold / toggle
+                        bind[field] = _choose_action(stdscr__, f"{rows[sel][1]}:",
+                                                     bind.get(field, "") or "")
+
         def _render_keys_page(sel=0):
             stdscr_.erase()
             h__, w__ = stdscr_.getmaxyx()
             try:
-                stdscr_.addnstr(0, 0, " Keys  (SEPARATE PAGE — press to capture, then pick tap/hold/toggle) " + "─"*(max(0,w__-65)), w__-1, curses.A_REVERSE)
-            except curses.error: pass
+                stdscr_.addnstr(0, 0, " Keys " + "─" * max(0, w__ - 6), w__ - 1,
+                                curses.A_REVERSE)
+            except curses.error:
+                pass
             if not binds:
-                try: stdscr_.addnstr(2, 2, "(no keys — press a to add)", w__-4)
-                except curses.error: pass
+                try:
+                    stdscr_.addnstr(2, 2, "(no bindings yet — press a to add, then PRESS THE KEY)", w__ - 4)
+                except curses.error:
+                    pass
                 y0 = 4
             else:
                 y0 = 2
                 for i, b in enumerate(binds):
-                    tap = b.get("tap","") or "off"; hold = b.get("hold","") or "off"; tog = b.get("toggle","") or "off"; thr = b.get("hold_threshold",0.25)
-                    line = f" {i+1}. {_key_label(b['key']):14}  tap={tap:12}  hold={hold:12}@{thr:g}s  toggle={tog:12}"
-                    if i == sel:
-                        try: stdscr_.addnstr(y0+i, 1, line[:w__-2], w__-2, curses.A_REVERSE)
-                        except curses.error: pass
-                    else:
-                        try: stdscr_.addnstr(y0+i, 1, line[:w__-2], w__-2)
-                        except curses.error: pass
-                try: stdscr_.addnstr(y0+len(binds)+1, 2, "toggle overrides tap; hold+tap idempotent", w__-4, curses.A_DIM)
-                except curses.error: pass
-            hint = " a add (press key) · e edit · d delete · Esc/q back"
-            try: stdscr_.addnstr(h__-1, 0, hint, w__-1)
-            except curses.error: pass
-            stdscr_.noutrefresh(); curses.doupdate()
+                    tap = b.get("tap", "") or "off"
+                    hold = b.get("hold", "") or "off"
+                    tog = b.get("toggle", "") or "off"
+                    thr = b.get("hold_threshold", 0.25)
+                    segs = []
+                    if tog:
+                        segs.append(f"toggle={tog}")
+                    if hold:
+                        segs.append(f"hold={hold}@{thr:g}s")
+                    if tap:
+                        segs.append(f"tap={tap}")
+                    if not segs:
+                        segs.append("(all off)")
+                    line = f" {i+1}. {_key_label(b['key']):16}  {' · '.join(segs)}"
+                    attrs = curses.A_REVERSE if i == sel else 0
+                    try:
+                        stdscr_.addnstr(y0 + i, 1, line[:w__ - 2], w__ - 2, attrs)
+                    except curses.error:
+                        pass
+                try:
+                    stdscr_.addnstr(y0 + len(binds) + 1, 2,
+                                    "toggle overrides tap; hold+tap / hold+toggle are idempotent — safe to combine",
+                                    w__ - 4, curses.A_DIM)
+                except curses.error:
+                    pass
+            hint = " a add (press key) · Enter edit · d delete · Esc/q back"
+            try:
+                stdscr_.addnstr(h__ - 1, 0, hint, w__ - 1)
+            except curses.error:
+                pass
+            stdscr_.noutrefresh()
+            curses.doupdate()
+
         sel = 0
         _render_keys_page(sel)
         while True:
@@ -2136,47 +2239,43 @@ def _tui_main() -> int:
             if ch in (27, ord("q"), ord("Q")):
                 return
             elif ch == curses.KEY_UP:
-                if binds: sel = (sel - 1) % len(binds); _render_keys_page(sel)
+                if binds:
+                    sel = (sel - 1) % len(binds)
+                    _render_keys_page(sel)
             elif ch == curses.KEY_DOWN:
-                if binds: sel = (sel + 1) % len(binds); _render_keys_page(sel)
+                if binds:
+                    sel = (sel + 1) % len(binds)
+                    _render_keys_page(sel)
             elif ch in (ord("a"), ord("A")):
-                if len(binds) >= 3: continue
+                if len(binds) >= 3:
+                    continue
                 name = _capture_key(stdscr_)
                 if not name:
                     name = _prompt_line(stdscr_, "key name (e.g. rightalt)", "").strip().lower()
-                    if not name: _render_keys_page(sel); continue
-                try: _key_code(name)
-                except SystemExit: _render_keys_page(sel); continue
-                if any(b.get("key")==name for b in binds): _render_keys_page(sel); continue
-                tap = _choose_action(stdscr_, "tap (short press) —", "")
-                hold = _choose_action(stdscr_, "hold (long press) —", "")
-                tog = _choose_action(stdscr_, "toggle (press to start/stop) —", "")
-                thr_raw = _prompt_line(stdscr_, "hold threshold seconds", "0.25").strip() or "0.25"
-                try: thr = float(thr_raw); assert 0 < thr <= 5
-                except Exception: _render_keys_page(sel); continue
-                binds.append({"key":name,"tap":tap,"hold":hold,"toggle":tog,"hold_threshold":thr})
-                sel = len(binds)-1; _render_keys_page(sel)
-            elif ch in (ord("e"), 10, 13, curses.KEY_ENTER, ord(" ")) and binds:
-                b = binds[sel]
-                rec = _capture_key(stdscr_)
-                nk = rec if rec else _prompt_line(stdscr_, f"key [{b['key']}] — press key or Enter keeps", b['key']).strip().lower() or b['key']
-                if nk != b['key'] and any(x.get("key")==nk for x in binds): _render_keys_page(sel); continue
-                try: _key_code(nk)
-                except SystemExit: _render_keys_page(sel); continue
-                tap = _choose_action(stdscr_, f"tap (was {b.get('tap','') or 'off'}) →", b.get('tap',''))
-                b["tap"] = tap
-                hold = _choose_action(stdscr_, f"hold (was {b.get('hold','') or 'off'}) →", b.get('hold',''))
-                b["hold"] = hold
-                tog = _choose_action(stdscr_, f"toggle (was {b.get('toggle','') or 'off'}) →", b.get('toggle',''))
-                b["toggle"] = tog
-                thr_raw = _prompt_line(stdscr_, f"threshold [{b.get('hold_threshold',0.25):g}]", "").strip()
-                if thr_raw:
-                    try: b["hold_threshold"] = float(thr_raw)
-                    except Exception: pass
-                b["key"] = nk; _render_keys_page(sel)
+                    if not name:
+                        _render_keys_page(sel)
+                        continue
+                try:
+                    _key_code(name)
+                except SystemExit:
+                    _render_keys_page(sel)
+                    continue
+                if any(b.get("key") == name for b in binds):
+                    _render_keys_page(sel)
+                    continue
+                bind = {"key": name, "tap": "", "hold": "", "toggle": "",
+                        "hold_threshold": 0.25}
+                binds.append(bind)
+                sel = len(binds) - 1
+                _edit_bind(stdscr_, bind)  # straight into the per-option editor
+                _render_keys_page(sel)
+            elif ch in (10, 13, curses.KEY_ENTER, ord(" "), ord("e"), ord("E")) and binds:
+                _edit_bind(stdscr_, binds[sel])
+                _render_keys_page(sel)
             elif ch in (ord("d"), ord("x"), curses.KEY_DC, 127) and binds:
                 binds.pop(sel)
-                if sel >= len(binds) and sel > 0: sel -= 1
+                if sel >= len(binds) and sel > 0:
+                    sel -= 1
                 _render_keys_page(sel)
 
     def _show_binds(stdscr) -> None:
@@ -2449,7 +2548,12 @@ def main() -> int:
     if sys.argv[1:2] == ["config"]:
         return _config_main()
     if sys.argv[1:2] == ["setup"]:
-        return _setup_main()
+        # Default setup is the full-screen TUI when run interactively.
+        # `shipboard setup --cli` (or a non-tty stdin) falls back to the
+        # numbered dialog.
+        if "--cli" in sys.argv[2:] or not sys.stdin.isatty() or os.environ.get("TERM") == "dumb":
+            return _setup_main()
+        return _tui_main()
     if sys.argv[1:2] in (["tui"], ["setup-tui"]):
         return _tui_main()
     if sys.argv[1:2] in (["daemon"], ["start"]):
@@ -2465,8 +2569,8 @@ def main() -> int:
             "CLI subcommands: daemon/start (run detached), stop (SIGTERM), "
             "restart (systemd or respawn), status (state), "
             "config (TOML editor), --send (paste+Enter).\n"
-            "Interactive: setup (numbered CLI dialog), "
-            "tui/setup-tui (full-screen curses setup)."
+            "Interactive: setup (full-screen TUI, default when a terminal; "
+            "--cli forces the numbered dialog), tui/setup-tui (curses setup)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
