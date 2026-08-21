@@ -88,7 +88,6 @@ record_channels = 1    # channels for pw-record and the wake listener
 # tap = "paste"
 # hold = ""
 # toggle = "record"
-# Legacy keys (key_record/key_send/key_record_send/key_record_mode/grace) still work if no [[key_bind]] is present (auto-migrated).
 # New: key -> behaviour (any 1-3 keys, any combo of tap/hold/toggle, no overlaps).
 # Hold = long press (>= hold_threshold), tap = short press, toggle = press to start/stop (overrides tap).
 # Example — your rightalt: tap=record (copy only), hold=record_send (copy+paste+Enter), tweakable per key:
@@ -99,16 +98,9 @@ record_channels = 1    # channels for pw-record and the wake listener
 # toggle = ""
 # hold_threshold = 0.25
 
-# Send mode (Scroll Lock / both keys)
+# Send mode
 paste_combo = "ctrl+shift+v"   # injected as a modifier combo (layout-proof)
-send_enter = true              # global default: also press Enter after pasting
-scroll_send_enter = true       # Scroll Lock tap: Enter after paste
-both_send_enter = true         # both keys held: Enter after paste
-
-# Both-keys detection window (seconds): Scroll Lock pressed this long before
-# Pause is still treated as "both held".
-grace = 0.5             # seconds; Scroll Lock pressed this long before
-                        # Pause is still treated as "both held"
+send_enter = true              # also press Enter after pasting
 
 # Dictation normalization: "тильда слэш точка конфиг" -> "~/.config"
 normalize = true
@@ -215,15 +207,7 @@ IDLE_MARKER = Path(_cfg("idle_marker", "WHISPER_IDLE_MARKER",
                         "/tmp/whisper-local-last-use"))
 MAX_HOLD = _cfg("max_hold", "SHIPBOARD_MAX_HOLD", 60.0, float)
 MIN_RECORDING = _cfg("min_recording", "SHIPBOARD_MIN_RECORDING", 0.5, float)
-GRACE = _cfg("grace", "SHIPBOARD_GRACE", 0.15, float)  # legacy: SL->Pause window (kept for compat, unused with [[key_bind]])
-# Legacy single-key vars (kept for migration; new config uses [[key_bind]])
-KEY_RECORD = _cfg("key_record", "SHIPBOARD_KEY_RECORD", "pause")
-KEY_SEND = _cfg("key_send", "SHIPBOARD_KEY_SEND", "scrolllock")
-KEY_RECORD_SEND = _cfg("key_record_send", "SHIPBOARD_KEY_RECORD_SEND", "")
-KEY_RECORD_MODE = _cfg("key_record_mode", "SHIPBOARD_KEY_RECORD_MODE",
-                       "hold", str.lower)
-if KEY_RECORD_MODE not in ("hold", "toggle"):
-    KEY_RECORD_MODE = "hold"
+# (no legacy key vars — configure via [[key_bind]] only)
 
 # --- key -> behaviour bindings ---
 _ALLOWED_ACTIONS = {"", "record", "record_send", "paste"}
@@ -261,25 +245,7 @@ def _parse_key_bindings(cfg: dict) -> list:
             # toggle overrides tap — warn but allow
             bindings.append({"key": key, "tap": tap, "hold": hold, "toggle": toggle, "hold_threshold": thr})
     else:
-        # legacy fallback: synthesize from old keys if any are set
-        legacy = []
-        if KEY_RECORD:
-            kr = KEY_RECORD.strip().lower()
-            if kr:
-                if KEY_RECORD_MODE == "toggle":
-                    legacy.append({"key": kr, "tap": "", "hold": "", "toggle": "record", "hold_threshold": _HOLD_THRESHOLD_DEFAULT})
-                else:
-                    legacy.append({"key": kr, "tap": "", "hold": "record", "toggle": "", "hold_threshold": _HOLD_THRESHOLD_DEFAULT})
-        if KEY_SEND:
-            ks = KEY_SEND.strip().lower()
-            if ks and ks not in [b["key"] for b in legacy]:
-                # scroll lock tap = paste (no Enter handling here, send_enter flag controls it)
-                legacy.append({"key": ks, "tap": "paste", "hold": "", "toggle": "", "hold_threshold": _HOLD_THRESHOLD_DEFAULT})
-        if KEY_RECORD_SEND:
-            krs = KEY_RECORD_SEND.strip().lower()
-            if krs and krs not in [b["key"] for b in legacy]:
-                legacy.append({"key": krs, "tap": "", "hold": "record_send", "toggle": "", "hold_threshold": _HOLD_THRESHOLD_DEFAULT})
-        bindings = legacy
+        bindings = []
     # no overlapping check
     seen = {}
     for b in bindings:
@@ -295,7 +261,6 @@ def _parse_key_bindings(cfg: dict) -> list:
     return bindings
 
 KEY_BINDINGS = _parse_key_bindings(_CFG)
-# keep legacy vars for backwards compat but mark deprecated in status
 
 RATE = _cfg("record_rate", "SHIPBOARD_RECORD_RATE", 16000, int)
 CHANNELS = _cfg("record_channels", "SHIPBOARD_RECORD_CHANNELS", 1, int)
@@ -867,7 +832,6 @@ def _watch_devices():
     import evdev
 
     wanted = {_key_code(b["key"]) for b in KEY_BINDINGS if b.get("key")}
-    # fallback: legacy already covered via KEY_BINDINGS synthesis
     if not wanted:
         return []
     devices = []
@@ -952,7 +916,7 @@ def _transcribe_copy(wav: Path) -> tuple[str, str]:
 
 def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
     """Record -> transcribe -> copy; auto-send if autosend. Returns exit code."""
-    # legacy one-shot wait: use first binding that has hold/record if present
+    # one-shot wait: first binding with hold/record
     first_hold_key = None
     for b in KEY_BINDINGS:
         if b.get("hold") in ("record","record_send"):
@@ -1040,7 +1004,7 @@ class _Daemon:
         self.rec_proc: subprocess.Popen | None = None
         self.rec_t0 = 0.0
         self.autosend = False
-        self.grace_deadline: float | None = None  # legacy grace (unused with bindings)
+        self.grace_deadline: float | None = None
         self.pause_down = False
         self.wake_rec = False
         self._inject_q: "queue.Queue[bool]" = queue.Queue()
@@ -1158,10 +1122,7 @@ class _Daemon:
             return
         if action == "paste":
             try:
-                # paste = paste clipboard; Enter per SEND_ENTER (global), scroll_send_enter for scroll-like legacy
-                # For new bindings use SEND_ENTER; keep scrolllock legacy via SCROLL_SEND_ENTER when key is scrolllock
-                use_enter = SCROLL_SEND_ENTER if key == "scrolllock" else SEND_ENTER
-                send_keys(enter=use_enter)
+                send_keys(enter=SEND_ENTER)
                 _log(f"paste action key={key} mode={mode}")
             except Exception as exc:
                 _notify("shipboard", f"Failed to send: {exc}")
@@ -1285,15 +1246,7 @@ class _Daemon:
                     self._rec_mode = "tap"
             return
 
-    def _on_pause(self, value: int) -> None:
-        # legacy shim - still called if daemon maps old keys, keep for compat but delegate
-        pass
-
-    def _on_record_send(self, value: int) -> None:
-        pass
-
-    def _on_scrolllock(self, value: int) -> None:
-        pass
+    # (legacy shims removed — see _on_key_press/_on_key_release)
 
     def run(self) -> None:
         import evdev
@@ -1416,8 +1369,7 @@ def _status_main() -> int:
     print(f"config:    {DEFAULT_CONFIG_PATH}")
     print(f"stt:       {WHISPER_URL}")
     if KEY_BINDINGS:
-        is_legacy = "key_bind" not in _CFG and "key_binding" not in _CFG and "key_bindings" not in _CFG
-        hdr = "keys:      (legacy -> auto-migrated to [[key_bind]])" if is_legacy else "keys:"
+        hdr = "keys:"
         for b in KEY_BINDINGS:
             k = _key_label(b["key"])
             thr = b.get("hold_threshold", _HOLD_THRESHOLD_DEFAULT)
@@ -1429,10 +1381,8 @@ def _status_main() -> int:
             hdr = "           "
     else:
         print("keys:      (none — wake words only)")
-    # legacy grace still shown for compat
-    print(f"paste:     {PASTE_COMBO} | Enter: "
-          f"paste={'yes' if SCROLL_SEND_ENTER else 'no'} both={'yes' if BOTH_SEND_ENTER else 'no'} global={'yes' if SEND_ENTER else 'no'}"
-          f" | grace {GRACE}s | max_hold {MAX_HOLD}s | min_rec {MIN_RECORDING}s")
+    print(f"paste:     {PASTE_COMBO} | Enter: {'yes' if SEND_ENTER else 'no'}"
+          f" | max_hold {MAX_HOLD}s | min_rec {MIN_RECORDING}s")
     print(f"normalize: {'on' if NORMALIZE else 'off'}")
     print(f"wakeword:  {'on (sherpa)' if WAKEWORD_ENABLED else 'off'}")
     if WAKEWORD_ENABLED:
@@ -1473,8 +1423,7 @@ def _config_main() -> int:
         print(f"config:    {DEFAULT_CONFIG_PATH}")
     print(f"stt:       {WHISPER_URL}")
     print(f"paste:     {PASTE_COMBO}{' + Enter' if SEND_ENTER else ''}")
-    print(f"recording: max_hold {MAX_HOLD}s, min {MIN_RECORDING}s,"
-          f" grace {GRACE}s")
+    print(f"recording: max_hold {MAX_HOLD}s, min {MIN_RECORDING}s")
     print(f"normalize: {'on' if NORMALIZE else 'off'}")
     return 0
 
@@ -1493,14 +1442,7 @@ _SETUP_FIELDS = [
     ("max_hold",           "Max hold  (stuck guard, seconds)",    float, "Recording"),
     ("min_recording",      "Ignore shorter than  (seconds)",      float, "Recording"),
     ("record_target",      "Mic source  (default = system)",      str, "Recording"),
-    # ── Keys — legacy, now hidden unless you need them (prefer [[key_bind]] via Keys screen) ──
-    ("key_record",         "Record key  (legacy, prefer Keys screen)", str, "Keys (legacy)"),
-    ("key_send",           "Send key  (legacy)",                  str, "Keys (legacy)"),
-    ("key_record_send",    "Record+send key  (legacy, optional)", str, "Keys (legacy)"),
-    ("key_record_mode",    "Record mode  (hold / toggle, legacy)", str, "Keys (legacy)"),
-    ("grace",              "Both-keys window  (legacy, seconds)",  float, "Keys (legacy)"),
-    ("scroll_send_enter",  "Scroll-key Enter  (legacy)",          bool, "Keys (legacy)"),
-    ("both_send_enter",    "Both-keys Enter  (legacy)",           bool, "Keys (legacy)"),
+    # (keys configured via [[key_bind]] — use the Keys screen [k])
     # ── Behind "Advanced" ──
     ("whisper_url",        "STT server URL",                      str, "Advanced"),
     ("whisper_health_url", "Health URL",                          str, "Advanced"),
@@ -1543,15 +1485,8 @@ def _field_defaults() -> dict:
         "record_channels": 1,
         "paste_combo": "ctrl+shift+v",
         "send_enter": True,
-        "scroll_send_enter": True,
-        "both_send_enter": True,
         "max_hold": 60.0,
         "min_recording": 0.5,
-        "grace": 0.15,
-        "key_record": "pause",
-        "key_send": "scrolllock",
-        "key_record_send": "",
-        "key_record_mode": "hold",
         "normalize": True,
         "prompt": "",
         "wakeword_enabled": False,
@@ -1714,14 +1649,7 @@ def _setup_prefill(values: dict) -> None:
                     break
     # populate key binds for setup editor
     if "_key_binds" not in values:
-        binds = []
-        if "key_bind" in _CFG or "key_binding" in _CFG or "key_bindings" in _CFG:
-            binds = [dict(b) for b in KEY_BINDINGS]
-        else:
-            # legacy mirror
-            for b in KEY_BINDINGS:
-                binds.append(dict(b))
-        values["_key_binds"] = binds
+        values["_key_binds"] = [dict(b) for b in KEY_BINDINGS]
 
 
 def _setup_main() -> int:
@@ -1750,28 +1678,19 @@ def _setup_main() -> int:
                 print(f"   • {_key_label(b.get('key','')):<12}  {'  ·  '.join(parts) if parts else '(off)'}{hint}")
         else:
             print("  Keys  (none yet — add your first binding)")
-            # show legacy hint if present
-            if values.get("key_record") or values.get("key_send"):
-                lr = _key_label(values.get("key_record","")); ls = _key_label(values.get("key_send",""))
-                print(f"      legacy: {lr} / {ls}  (add a Keys bind to override)")
+
         print("     [k] keys: add / edit / remove")
         # ── Essentials + Recording + collapsed sections ──
         last_section = None
         for i, (key, label, conv, section) in enumerate(_SETUP_FIELDS, start=1):
             is_adv = (section == "Advanced")
-            is_legacy_keys = (section == "Keys (legacy)")
-            if is_adv or is_legacy_keys:
-                if is_adv and not show_advanced and section != last_section:
-                    # first advanced field — render a collapsed row instead of all fields
+            if is_adv:
+                if not show_advanced and section != last_section:
                     adv_count = sum(1 for _,_,_,s in _SETUP_FIELDS if s == "Advanced")
                     print(f"\n  … Advanced  ({adv_count} settings)  [a] show / hide")
                     last_section = section
                     continue
-                elif is_legacy_keys and not show_advanced and section != last_section:
-                    print(f"\n  … Keys (legacy)  [a] show")
-                    last_section = section
-                    continue
-                elif (is_adv or is_legacy_keys) and not show_advanced:
+                elif not show_advanced:
                     last_section = section
                     continue
             if section != last_section:
