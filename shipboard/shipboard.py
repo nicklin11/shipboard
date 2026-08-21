@@ -2067,6 +2067,7 @@ def _tui_main() -> int:
         return message
 
     def run(stdscr) -> int:
+        nonlocal rows, show_advanced
         try:
             curses.curs_set(0)
         except curses.error:
