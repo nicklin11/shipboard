@@ -5,4 +5,4 @@ After=docker.service
 [Service]
 Type=oneshot
 Environment=WHISPER_IDLE_SECONDS=300
-ExecStart=%h/.config/whisper-local/scripts/whisper_idle_stop.sh
+ExecStart=%h/Coding/shipboard/scripts/whisper_idle_stop.sh

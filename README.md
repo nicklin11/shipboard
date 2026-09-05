@@ -1,260 +1,194 @@
 # shipboard
 
-On-demand local speech-to-text for Linux desktops, plus a hold-to-talk voice
-input daemon for agent TUIs.
+On-demand local speech-to-text for Linux desktops, plus a voice input daemon
+for agent TUIs.
 
 A whisper.cpp server that **sleeps when idle** (frees ~1.5 GiB of VRAM) and
 **wakes on the first request**, paired with `shipboard` — a compositor-agnostic
-daemon that turns keys (Pause / Scroll Lock by default) into:
-
-| Keys (defaults) | What happens |
-|---|---|
-| **Pause** (hold) | record → whisper → clipboard |
-| **Scroll Lock** (tap) | paste clipboard → Enter (send) |
-| **Pause + Scroll Lock** | record → whisper → clipboard → paste → Enter (auto-send) |
-
-All triggers are configurable evdev keys — see [Keys](#keys).
+daemon that turns trigger keys (and optional wake words) into dictation:
+record → whisper → clipboard → paste → Enter.
 
 Everything runs locally — no cloud, no audio leaves your machine.
 
 ```
 ┌────────────┐  evdev   ┌──────────────┐  pw-record  ┌──────────────┐
-│ Pause/ScrLk│ ───────► │ shipboard   │ ──────────► │  audio.wav   │
-│  keyboard  │          │ (daemon, WM- │             └──────┬───────┘
-└────────────┘          │  agnostic)   │                    │
-                        └──────┬───────┘                    ▼
+│ trigger key│ ───────► │ shipboard   │ ──────────► │  audio.wav   │
+│ / wake word│          │ (daemon)     │             └──────┬───────┘
+└────────────┘          └──────┬───────┘                    ▼
                                │ wl-copy           ┌─────────────────┐
-                               │                   │ whisper.cpp     │
-                               ▼                   │ container (GPU) │
-                        ┌──────────────┐  HTTP     └────────┬────────┘
-                        │  clipboard   │ ◄───────────────────┘
+                               ▼                   │ whisper.cpp     │
+                        ┌──────────────┐  HTTP     │ container       │
+                        │  clipboard   │ ◄─────────┴────────┬────────┘
                         └──────┬───────┘   wakes on demand,
-                               │           sleeps when idle
-                               ▼
+                               ▼           sleeps when idle
                         paste + Enter (send modes)
 ```
 
-## Why this exists
+## How the pieces fit
 
-- **VRAM is precious.** The container is stopped by a systemd timer after
-  idle time and started on demand by a wake proxy — zero GPU footprint until
-  you actually speak.
-- **Agent workflows.** Dictate a prompt, hit one key, and it lands in your
-  TUI chat box (kitty, opencode, Hermes, whatever) and gets submitted.
-- **Layout-proof input.** The paste is injected as a modifier combo via
-  uinput, so Cyrillic and any other layout paste correctly.
+| Piece | What it is | Where it lives |
+|---|---|---|
+| **shipboard daemon** | evdev key listener + optional sherpa-onnx wake words + pw-record capture + whisper HTTP client | installed Python package (`src/shipboard/`) |
+| **whisper.cpp container** | `whisper-local` via docker compose, Vulkan build, `large-v3-turbo` | `docker-compose.yml` in this repo |
+| **wake proxy** | tiny HTTP proxy: wakes the container on the first request, then relays | `scripts/whisper_wake_proxy.py` + `systemd/whisper-wake-proxy.service` |
+| **idle-stop** | systemd timer, checks every minute, `docker stop` after 5 min of silence | `scripts/whisper_idle_stop.sh` + `systemd/whisper-idle-stop.{service,timer}` |
+
+The daemon only needs the proxy's URL — it never talks to docker itself,
+except for the on-demand `docker start` when it wakes the container directly.
 
 ## Requirements
 
 - Linux with Docker and a GPU supported by whisper.cpp's Vulkan build
   (AMD/Intel/NVIDIA; the compose file exposes `/dev/dri/renderD128`)
-- PipeWire (`pw-record`), `wl-clipboard`, `python-evdev` (for shipboard)
-- systemd user session (for the units)
+- PipeWire (`pw-cat`/`pw-record`), `wl-clipboard`, `python-evdev`
+- systemd user session (for the proxy/idle-stop units)
 
 ## Quick start
 
 ```bash
-# 1. Start the whisper server (downloads the model on first run)
+git clone git@github.com:nicklin11/shipboard.git ~/Coding/shipboard
+cd ~/Coding/shipboard
+
+# 1. Python package + `shipboard` command (editable install)
+pip install --user -e .
+
+# 2. STT backend: start the whisper container (downloads the model on first run)
 docker compose up -d
 
-# 2. Install the wake-proxy + idle-stop units
+# 3. systemd glue: wake proxy + idle-stop timer
 ./scripts/install.sh
-#    proxy listens on 127.0.0.1:10300, wakes the container on demand,
-#    stops it after 5 minutes of silence
 
-# 3. Install the shipboard daemon
-install -m 0755 shipboard/shipboard.py ~/.local/bin/shipboard
-install -m 0644 shipboard/shipboard.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now shipboard
+# 4. Configure keys / STT / wake words (guided, TUI or numbered CLI)
+shipboard setup
+
+# 5. Run the daemon
+shipboard daemon          # or: systemctl --user enable --now shipboard
 ```
 
-No compositor keybinds are needed for the keys themselves: the daemon reads
-Pause / Scroll Lock straight from evdev. You only need one compositor tweak —
-**swallow the keys** so they don't leak into apps (see Troubleshooting).
+## STT: the whisper container
 
-## shipboard CLI
+The container is **not** running all the time:
 
-The installed `shipboard` binary manages the daemon from the command line:
+1. The **wake proxy** (port 10300) accepts requests; the first request does
+   `docker start whisper-local` and waits for `/health`, then relays.
+2. Every request **touches an idle marker** (`/tmp/whisper-local-last-use`).
+3. The **idle-stop timer** checks every minute: if the container is running
+   and the marker is older than `WHISPER_IDLE_SECONDS` (default 300 s), it
+   runs `docker stop`. Result: zero VRAM footprint while you're not talking.
+
+So from the daemon's point of view STT is just two URLs:
+
+```toml
+whisper_url        = "http://127.0.0.1:10300/inference"
+whisper_health_url = "http://127.0.0.1:10300/health"
+whisper_container  = "whisper-local"
+```
+
+Tune the model via compose environment (`WHISPER_MODEL`, `WHISPER_LANGUAGE`,
+`WHISPER_BEAM`, VAD knobs — see `docker-compose.yml`). Check health:
+`curl 127.0.0.1:10300/health`.
+
+### Remote use (Tailscale, optional)
+
+To transcribe from another machine (e.g. a laptop) through this machine's
+whisper: copy `systemd/whisper-tailnet-proxy.service.example` to
+`~/.config/systemd/user/whisper-tailnet-proxy.service`, set
+`WHISPER_PROXY_HOST` to this machine's tailnet IP, enable it, and point the
+client's `whisper_url` at `http://<tailnet-ip>:<port>/inference`.
+
+## Keys
+
+Triggers are plain evdev keys read directly by the daemon (the compositor
+only has to *swallow* them so they don't leak into apps — see
+Troubleshooting). Keys are configured as `[[key_bind]]` tables in
+`~/.config/shipboard/shipboard.toml`, or interactively in `shipboard setup`
+(Keys screen — press the key you want to bind and it gets captured).
+
+```toml
+[[key_bind]]
+key = "pause"            # evdev name, with or without the KEY_ prefix
+tap = "record"           # short press  ("" = nothing)
+hold = "record_send"     # held >= hold_threshold  ("" = nothing)
+toggle = ""              # press-start / press-stop (overrides tap)
+hold_threshold = 0.25    # seconds
+```
+
+| Field | Meaning |
+|---|---|
+| `key` | evdev key name: `pause`, `scrolllock`, `f13`, `rightalt`, … (`""` disables the binding) |
+| `tap` | action on a short press: `record` / `record_send` / `paste` |
+| `hold` | action when held past `hold_threshold` |
+| `toggle` | action toggled by presses (overrides `tap` when set) |
+| `hold_threshold` | tap vs hold boundary, seconds |
+
+Actions: `record` → transcribe → clipboard; `record_send` → transcribe →
+clipboard → paste (+Enter per the flags below); `paste` → paste current
+clipboard (+Enter per `scroll_send_enter`).
+
+**Tap = one-press dictation.** A tap starts recording with no release to
+stop it, so the recording auto-finishes after `tap_stop_silence` seconds of
+quiet (default: same as `wakeword_stop_silence`; `0` disables). Set it to 0
+only if you want the old latch behaviour (tap again to stop).
+
+Rules: 1–3 bindings, one action set per key, no overlapping keys.
+
+### Enter after paste (three flags on purpose)
+
+| Option | Meaning |
+|---|---|
+| `send_enter` | global default for every paste |
+| `scroll_send_enter` | override for the `paste` action (tap/wake paste) |
+| `both_send_enter` | override for `record_send` paths |
+
+## Wake words
+
+Optional hands-free trigger: a sherpa-onnx KWS listener starts recording when
+it hears a phrase. Configured in `shipboard setup` (Wake words section) or
+directly in the TOML:
+
+```toml
+wakeword_enabled = false
+wakeword_record = "copy it, take it, grab it, catch it"     # → record
+wakeword_send   = "push it, ship it, send it, drop it"      # → record_send
+wakeword_paste  = "paste it, insert it, stick it"           # → paste
+wakeword_sherpa_threshold = 0.2   # lower = easier to trigger
+wakeword_grace = 3.0              # ignore silence right after a trigger
+wakeword_stop_silence = 2.5       # seconds of silence end the recording
+```
+
+The listener lives in a separate venv (`~/.local/share/shipboard-venv`,
+sherpa-onnx + numpy); models go to `~/.local/share/shipboard/models/`.
+
+## CLI reference
 
 | Command | What it does |
 |---|---|
-| `shipboard daemon` (alias: `start`) | run the daemon detached (reports if it's already running) |
+| `shipboard daemon` (alias `start`) | run the daemon detached (reports if already running) |
 | `shipboard stop` | SIGTERM to all daemon processes |
-| `shipboard restart` | restart via systemd, else respawn detached |
-| `shipboard status` | print daemon / STT / keys / wake-word state |
-| `shipboard setup` | numbered CLI dialog over all settings (sections: STT, Recording, Send, Keys, Wake words, Platform) |
-| `shipboard tui` (alias: `setup-tui`) | full-screen curses setup: `↑/↓` navigate · `Enter` edit · `s` save · `t` test STT · `p` compositor bind snippets · `r` restart daemon · `q` quit |
+| `shipboard restart` | restart via systemd if installed, else respawn detached |
+| `shipboard status` | daemon / STT / keys / wake-word state |
+| `shipboard setup` | numbered CLI dialog (sections: STT, Recording, Send, Keys, Wake words, Platform) |
+| `shipboard tui` (alias `setup-tui`) | full-screen curses setup: `↑/↓` navigate · `Enter` edit · `s` save · `t` test STT · `p` compositor bind snippets · `r` restart daemon · `q` quit |
 | `shipboard config` | interactive TOML editor |
-| `shipboard --send` | one-shot paste clipboard + Enter (no daemon) |
-| `shipboard --seconds N` | record for a fixed N seconds, then transcribe (one-shot) |
-| `shipboard --file PATH` | transcribe an existing audio file to the clipboard (one-shot) |
-| `shipboard --no-copy` | print the transcript instead of copying (with `--file`/`--seconds`) |
+| `shipboard --seconds N` | one-shot: record N seconds, transcribe |
+| `shipboard --file PATH` | one-shot: transcribe an audio file |
+| `shipboard --send` | one-shot: paste clipboard + Enter |
+| `shipboard --no-copy` | with `--file`/`--seconds`: print instead of copying |
 
-`shipboard daemon` is the explicit way to run as a daemon without systemd —
-the process detaches and keeps running until `shipboard stop`. For a
-login-managed service, install the unit instead (see Quick start).
-
-### Running as a daemon
-
-Either way works; the CLI commands accept both:
-
-```bash
-# 1. Plain daemon (no systemd) — survives until stopped:
-shipboard daemon          # or: shipboard start
-shipboard status
-shipboard stop
-
-# 2. systemd user service (auto-start on login, auto-restart):
-systemctl --user enable --now shipboard
-```
-
-The `setup` / `tui` dialogs write `~/.config/shipboard/shipboard.toml` and
-print the compositor keybind snippets needed so Pause / Scroll Lock don't
-leak into focused apps (see Troubleshooting).
-
-## shipboard usage
-
-### Keys
-
-The daemon reads keys straight from evdev — no compositor binds are needed
-(the compositor only has to swallow them so they don't leak into apps, see
-Troubleshooting). All three triggers are configurable:
-
-| Setting | Default | Mode | Action |
-|---|---|---|---|
-| `key_record` | `pause` | hold / toggle | record → whisper → clipboard |
-| `key_send` | `scrolllock` | tap | paste clipboard → Enter (send) |
-| `key_record_send` | *(disabled)* | hold | record → whisper → clipboard → paste + Enter (one key) |
-
-- `key_record_mode = "hold"` records while the key is held; `"toggle"`
-  starts recording on press and stops on the next press.
-- Holding `key_record` and pressing `key_send` (any order, within `grace`,
-  0.15 s by default) records and auto-sends: record → whisper → clipboard →
-  paste + Enter.
-- Setting a key to an empty string (`""`) disables that trigger.
-
-Key names are evdev names from `linux/input-event-codes.h`, with or without
-the `KEY_` prefix — `pause`, `KEY_PAUSE`, `scrolllock`, `insert`, `home`,
-`f13`, … Change them in `shipboard setup` (Keys section), in
-`shipboard.toml`, or via env vars `SHIPBOARD_KEY_RECORD` /
-`SHIPBOARD_KEY_SEND` / `SHIPBOARD_KEY_RECORD_SEND` /
-`SHIPBOARD_KEY_RECORD_MODE`.
-
-### Behaviour
-
-- Hold **Pause**, speak, release → transcript lands in the clipboard
-  (notifications: Запись → Обработка голоса → Скопировано).
-- Tap **Scroll Lock** → the current clipboard is pasted and Enter is pressed.
-- Hold **Pause** and press **Scroll Lock** (any order, ~150 ms window) →
-  the transcript is pasted and sent automatically after recognition.
-- With `key_record_mode = "toggle"`, press **Pause** to start recording and
-  press again to stop and process.
-- If `key_record_send` is set, holding it records and sends in one go
-  (record → clipboard → paste + Enter).
-
-Config (env vars or TOML):
-
-| Option | Env var | Default | Meaning |
-|---|---|---|---|
-| `whisper_url` | `WHISPER_CPP_URL` | `http://127.0.0.1:10300/inference` | STT endpoint (wake proxy) |
-| `whisper_health_url` | `WHISPER_CPP_HEALTH_URL` | `http://127.0.0.1:10300/health` | health endpoint |
-| `whisper_container` | `WHISPER_CONTAINER` | `whisper-local` | container to wake |
-| `whisper_language` | `SHIPBOARD_WHISPER_LANGUAGE` | `auto` | language hint sent to whisper (`auto`/`ru`/`en`/…) |
-| `key_record` | `SHIPBOARD_KEY_RECORD` | `pause` | record trigger, evdev key name (see [Keys](#keys)); empty = trigger disabled |
-| `key_send` | `SHIPBOARD_KEY_SEND` | `scrolllock` | send trigger, evdev key name; empty = trigger disabled |
-| `key_record_send` | `SHIPBOARD_KEY_RECORD_SEND` | `""` | optional third trigger: record → whisper → clipboard → paste + Enter in one go |
-| `key_record_mode` | `SHIPBOARD_KEY_RECORD_MODE` | `hold` | `hold` = record while held, `toggle` = press to start / press again to stop |
-| `paste_combo` | `SHIPBOARD_PASTE_COMBO` | `ctrl+shift+v` | paste shortcut to inject (see key set below) |
-| `send_enter` | `SHIPBOARD_SEND_ENTER` | `1` | global default: also press Enter after paste |
-| `scroll_send_enter` | `SHIPBOARD_SCROLL_SEND_ENTER` | *(= send_enter)* | Scroll Lock tap: also press Enter after paste |
-| `both_send_enter` | `SHIPBOARD_BOTH_SEND_ENTER` | *(= send_enter)* | both-keys send: also press Enter after paste |
-| `max_hold` | `SHIPBOARD_MAX_HOLD` | `60` | single cap on recording length, seconds (stuck guard) |
-| `min_recording` | `SHIPBOARD_MIN_RECORDING` | `0.5` | minimum recording seconds |
-| `grace` | `SHIPBOARD_GRACE` | `0.15` | both-keys detection window (s) |
-| `record_rate` | `SHIPBOARD_RECORD_RATE` | `16000` | pw-record sample rate (Hz) |
-| `record_channels` | `SHIPBOARD_RECORD_CHANNELS` | `1` | pw-record channel count |
-| `kws_threads` | `SHIPBOARD_KWS_THREADS` | `2` | wake-word (sherpa KWS) onnxruntime threads |
-| `normalize` | `SHIPBOARD_NORMALIZE` | `1` | dictation normalization: spoken punctuation names become glued symbols (`тильда слэш точка конфиг` → `~/.config`) |
-| `record_target` | `SHIPBOARD_RECORD_TARGET` | `""` | record source for pw-record (`default`/empty = system default, or a device name like `alsa_input.pci-...analog-stereo`) |
-| `prompt` | `SHIPBOARD_PROMPT` | `""` | optional initial prompt sent to whisper (domain vocabulary) |
-
-### Wake words
-
-Optional hands-free trigger: a sherpa-onnx KWS listener that starts recording
-when it hears a phrase. Configurable from `shipboard setup` (Wake words
-section) or the TOML file:
-
-| Option | Env var | Default | Meaning |
-|---|---|---|---|
-| `wakeword_enabled` | `SHIPBOARD_WAKEWORD_ENABLED` | `0` | enable the wake-word listener |
-| `wakeword_keywords` | `SHIPBOARD_WAKEWORD_KEYWORDS` | *(see example)* | `phrase:action` pairs, e.g. `"alter capture:record, alter send:record_send"` |
-| `wakeword_cooldown` | `SHIPBOARD_WAKEWORD_COOLDOWN` | `2.0` | seconds between triggers |
-| `wakeword_grace` | `SHIPBOARD_WAKEWORD_GRACE` | `3.0` | keep recording through silence right after a trigger |
-| `wakeword_stop_silence` | `SHIPBOARD_WAKEWORD_STOP_SILENCE` | `1.5` | seconds of silence end the recording |
-| `wakeword_silence_level` | `SHIPBOARD_WAKEWORD_SILENCE_LEVEL` | `500` | RMS below this counts as silence |
-
-### Platform backends
-
-The daemon picks the best backend for the running session automatically; each
-can be pinned in the TOML file (Platform section of `shipboard setup`):
-
-| Option | Default | Meaning |
-|---|---|---|
-| `inject_backend` | `auto` | key injection: `auto` / `uinput` / `wtype` / `pynput` |
-| `notify_backend` | `auto` | notifications: `auto` / `notify-send` / `osascript` / `powershell` |
-| `clipboard_backend` | `auto` | clipboard: `auto` / `wl-copy` / `xclip` / `pbcopy` / `clip` |
-| `record_backend` | `auto` | recording: `auto` / `pw-record` / `ffmpeg` |
-| `input_device_glob` | `""` | evdev device glob, e.g. `/dev/input/event*` |
-| `keep_audio_dir` | `""` | keep recordings in this dir instead of deleting them |
-| `dry_run` | `0` | log actions without performing them |
-
-Key listening is Linux evdev; injection/clipboard/notifications also have
-macOS and Windows backends behind the same neutral API.
-
-`paste_combo` is a `+`-separated combo: one or more modifiers
-(`ctrl`/`shift`/`alt`/`super`) followed by a final key from letters `a`–`z`,
-digits `0`–`9`, `f1`–`f24`, or `v`, `insert`, `enter`, `space`, `tab`, `home`,
-`end`, `pageup`, `pagedown`, `delete`, `backspace`.
-
-All of these can also be set in the TOML config file generated by
-`shipboard config` (see `shipboard/shipboard.toml.example`); env vars win.
-
-## Hermes integration
-
-`scripts/whisper_cpp_stt.py` is a ready STT provider client for
-[Hermes Agent](https://hermes-agent.nousresearch.com). Wire it with:
-
-```bash
-./scripts/install_hermes_stt.sh
-```
-
-## Remote use (Tailscale, optional)
-
-Want to transcribe from another machine (a laptop) using this computer's GPU?
-The wake proxy can listen on the tailnet instead of localhost:
-
-1. Copy `systemd/whisper-tailnet-proxy.service.example` to
-   `~/.config/systemd/user/whisper-tailnet-proxy.service`, set
-   `WHISPER_PROXY_HOST` to this machine's tailnet IP (`tailscale ip -4`), and
-   enable it.
-2. On the client machine, point the client at
-   `http://<this-machine-ip>:<port>/inference` (e.g. set `whisper_url` in the
-   shipboard TOML config).
-
-The proxy wakes the container on demand, so the GPU stays free until a
-request actually arrives.
+State lives in `~/.local/state/shipboard/state.json`; personal config in
+`~/.config/shipboard/shipboard.toml` (created/edited by `setup`; never
+committed). Every TOML option also has an env override — see the defaults at
+the top of `src/shipboard/config.py`.
 
 ## Troubleshooting
 
-**Pressing Pause/Scroll Lock types garbage like `[57362u` into TUIs.**
-If the key is not bound in the compositor, it reaches the focused app, and
-kitty's keyboard protocol encodes it as `CSI <code>u` (57362 = Pause) which
-some TUIs render as literal text. Bind the keys to a no-op so the compositor
-swallows them — the daemon still sees them via evdev:
+**Pressing the trigger key types garbage like `[57362u` into TUIs.**
+The compositor must swallow the keys (bind them to a no-op); the daemon still
+sees them via evdev. `shipboard setup` / `shipboard tui` (`p`) prints the
+snippets:
 
 ```kdl
-// niri (~/.config/niri/conf/binds.kdl) — note KDL comments use //
+// niri — KDL comments use //
 Pause repeat=false { spawn "true"; }
 Scroll_Lock repeat=false { spawn "true"; }
 ```
@@ -265,12 +199,16 @@ bind = , Pause, exec, true
 bind = , Scroll_Lock, exec, true
 ```
 
-**The container doesn't wake.** Check the proxy is listening
-(`curl 127.0.0.1:10300/health`) and that `whisper-wake-proxy.service` is
-running (`systemctl --user status whisper-wake-proxy`).
+**The container doesn't wake.** Check the proxy: `curl 127.0.0.1:10300/health`
+and `systemctl --user status whisper-wake-proxy`.
 
-**VRAM is still used after idle.** The idle-stop timer checks every minute;
-the container stops after `WHISPER_IDLE_SECONDS` (default 300) of no requests.
+**VRAM is still used after idle.** The idle-stop timer fires every minute; the
+container stops after `WHISPER_IDLE_SECONDS` (default 300) with no requests.
+A manually started container always gets a 5-minute grace period first.
+
+**Dictation gets cut mid-speech.** Check `tap_stop_silence` /
+`wakeword_stop_silence` (silence windows) and `max_hold` (absolute cap)
+against how long you actually pause.
 
 ## Credits
 
@@ -278,7 +216,7 @@ the container stops after `WHISPER_IDLE_SECONDS` (default 300) of no requests.
   `ghcr.io/ggml-org/whisper.cpp:main-vulkan` image
 - [Silero VAD](https://github.com/snakers4/silero-vad) for voice activity
   detection
-- python-evdev for key handling and injection
+- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) for keyword spotting
 
 ## License
 

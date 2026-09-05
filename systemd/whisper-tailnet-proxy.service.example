@@ -12,7 +12,7 @@ Wants=whisper-wake-proxy.service
 Environment=WHISPER_PROXY_HOST=100.64.0.1
 Environment=WHISPER_PROXY_PORT=10301
 Environment=WHISPER_BACKEND_PORT=10302
-ExecStart=/usr/bin/python3 %h/.config/whisper-local/scripts/whisper_wake_proxy.py
+ExecStart=/usr/bin/python3 %h/Coding/shipboard/scripts/whisper_wake_proxy.py
 Restart=always
 RestartSec=2
 
