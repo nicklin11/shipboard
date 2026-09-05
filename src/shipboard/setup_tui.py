@@ -520,7 +520,7 @@ def _tui_main() -> int:
         return None
 
     def _choose_action(stdscr_, prompt, current=""):
-        """Action picker: ↑/↓ + Enter; Esc keeps the current value."""
+        """Action picker: centered popup list, ↑/↓ + Enter; Esc keeps value."""
         items = [("record", "copy only"), ("record_send", "copy+paste+Enter"),
                  ("paste", "paste clipboard"), ("", "off")]
         sel = 0
@@ -528,23 +528,29 @@ def _tui_main() -> int:
             if v == current:
                 sel = i
                 break
-        hint = " ↑↓ choose · Enter ok · Esc cancel"
+        h_, w_ = stdscr_.getmaxyx()
+        bh = min(len(items) + 6, max(5, h_ - 2))
+        bw = min(max(40, len(prompt) + 6), max(20, w_ - 4))
+        y0 = max(0, (h_ - bh) // 2 - 2)
+        x0 = max(0, (w_ - bw) // 2)
+        win = curses.newwin(bh, bw, y0, x0)
+        win.keypad(True)
         while True:
-            h_, w_ = stdscr_.getmaxyx()
             try:
-                stdscr_.move(h_ - 1, 0)
-                stdscr_.clrtoeol()
-                line = prompt + "  " + "  ".join(
-                    f"▶{v or 'off'}" if i == sel else f" {v or 'off'}:{lbl}"
-                    for i, (v, lbl) in enumerate(items))
-                x = max(0, w_ - len(hint))
-                stdscr_.addnstr(h_ - 1, 0, line[:x - 1], w_ - 1)
-                stdscr_.addnstr(h_ - 1, x, hint, len(hint))
-                stdscr_.noutrefresh()
-                curses.doupdate()
+                win.erase()
+                win.box()
+                win.addnstr(1, 2, prompt[:bw - 4], bw - 4, curses.A_BOLD)
+                for i, (v, lbl) in enumerate(items):
+                    mark = "▶" if i == sel else " "
+                    txt = f" {mark} {(v or 'off'):<12} {lbl}"
+                    attr = curses.A_REVERSE if i == sel else 0
+                    win.addnstr(3 + i, 1, txt[:bw - 2], bw - 2, attr)
+                win.addnstr(bh - 2, 2, "↑/↓ move · Enter choose · Esc cancel",
+                            bw - 4, curses.A_DIM)
+                win.refresh()
             except curses.error:
                 pass
-            ch = stdscr_.getch()
+            ch = win.getch()
             if ch in (curses.KEY_UP, curses.KEY_LEFT):
                 sel = (sel - 1) % len(items)
             elif ch in (curses.KEY_DOWN, curses.KEY_RIGHT, 9):  # Tab
