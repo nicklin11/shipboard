@@ -413,6 +413,17 @@ _SETUP_FIELDS = [
     for (key, label, desc, conv, fmt) in fields
 ]
 
+# Fields with a small known value set: setup TUI shows a popup list instead
+# of a free-text prompt. record_target is special-cased in setup_tui.py
+# (choices come from `pactl list sources short` at runtime).
+_FIELD_CHOICES = {
+    "inject_backend": ["auto", "uinput", "wtype", "pynput"],
+    "notify_backend": ["auto", "notify-send", "osascript", "powershell"],
+    "clipboard_backend": ["auto", "wl-copy", "xclip", "pbcopy", "clip"],
+    "record_backend": ["auto", "pw-record", "ffmpeg"],
+    "wakeword_action": ["record", "record_send"],
+}
+
 
 def _field_defaults() -> dict:
     return {

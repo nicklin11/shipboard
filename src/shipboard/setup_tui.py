@@ -15,19 +15,38 @@ Both interfaces mirror the same tree (see config._SETUP_SECTIONS):
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
 import time
 from urllib import request as urllib_request
 
 from .config import (DEFAULT_CONFIG_PATH, DEFAULT_CONFIG_TEXT, MAX_HOLD,
                      MIN_RECORDING, NORMALIZE, PASTE_COMBO, SEND_ENTER,
-                     WHISPER_URL, _CFG, _SETUP_FIELDS, _SETUP_SECTIONS,
-                     SECTION_ADVANCED, SECTION_RECORDING, _field_defaults,
-                     _fmt_value, _parse_value, _save_config_file,
-                     _setup_prefill)
+                     WHISPER_URL, _CFG, _FIELD_CHOICES, _SETUP_FIELDS,
+                     _SETUP_SECTIONS, SECTION_ADVANCED, SECTION_RECORDING,
+                     _field_defaults, _fmt_value, _parse_value,
+                     _save_config_file, _setup_prefill)
 from .keys import _key_code, _key_label
 from .logstate import _daemon_running
+
+
+def _list_mic_sources() -> list[str]:
+    """Record sources for the record_target popup ('' on failure)."""
+    try:
+        out = subprocess.run(["pactl", "-f", "json", "list", "sources", "short"],
+                             capture_output=True, text=True, timeout=3).stdout
+        return [e["name"] for e in json.loads(out) if e.get("name")]
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["pactl", "list", "sources", "short"],
+                             capture_output=True, text=True, timeout=3).stdout
+        return [parts[1] for line in out.splitlines()
+                if len(parts := line.split("\t")) > 1 and parts[1].strip()]
+    except Exception:
+        return []
 
 # Sections shown on the home screen, in menu order; Advanced stays collapsed.
 TOP_SECTIONS = tuple(s for s, _fields in _SETUP_SECTIONS
@@ -519,18 +538,21 @@ def _tui_main() -> int:
         # evdev unavailable / timed out — caller falls back to a typed name
         return None
 
-    def _choose_action(stdscr_, prompt, current=""):
-        """Action picker: centered popup list, ↑/↓ + Enter; Esc keeps value."""
-        items = [("record", "copy only"), ("record_send", "copy+paste+Enter"),
-                 ("paste", "paste clipboard"), ("", "off")]
+    def _popup_choice(stdscr_, prompt, items, current):
+        """Centered popup list: items=[(value, label)], ↑/↓ + Enter, Esc=keep."""
         sel = 0
         for i, (v, _) in enumerate(items):
             if v == current:
                 sel = i
                 break
+        rows = []
+        for v, lbl in items:
+            rows.append(v if lbl == v else f"{(v or 'off'):<12} {lbl}")
         h_, w_ = stdscr_.getmaxyx()
         bh = min(len(items) + 6, max(5, h_ - 2))
-        bw = min(max(40, len(prompt) + 6), max(20, w_ - 4))
+        bw = min(max(40, len(prompt) + 6,
+                     max((len(r) for r in rows), default=0) + 6),
+                 max(20, w_ - 4))
         y0 = max(0, (h_ - bh) // 2 - 2)
         x0 = max(0, (w_ - bw) // 2)
         win = curses.newwin(bh, bw, y0, x0)
@@ -540,9 +562,9 @@ def _tui_main() -> int:
                 win.erase()
                 win.box()
                 win.addnstr(1, 2, prompt[:bw - 4], bw - 4, curses.A_BOLD)
-                for i, (v, lbl) in enumerate(items):
+                for i, row in enumerate(rows):
                     mark = "▶" if i == sel else " "
-                    txt = f" {mark} {(v or 'off'):<12} {lbl}"
+                    txt = f" {mark} {row}"
                     attr = curses.A_REVERSE if i == sel else 0
                     win.addnstr(3 + i, 1, txt[:bw - 2], bw - 2, attr)
                 win.addnstr(bh - 2, 2, "↑/↓ move · Enter choose · Esc cancel",
@@ -559,6 +581,12 @@ def _tui_main() -> int:
                 return items[sel][0]
             elif ch == 27:
                 return current
+
+    def _choose_action(stdscr_, prompt, current=""):
+        """Action picker for bind editor rows (record / record_send / paste / off)."""
+        items = [("record", "copy only"), ("record_send", "copy+paste+Enter"),
+                 ("paste", "paste clipboard"), ("", "off")]
+        return _popup_choice(stdscr_, prompt, items, current)
 
     def _edit_bind_page(stdscr, bind, binds) -> None:
         """Per-bind editor: one option per line. Key = press-to-capture,
@@ -664,7 +692,18 @@ def _tui_main() -> int:
         except curses.error:
             pass
         message = ""
-        if conv is bool:
+        choices = list(_FIELD_CHOICES.get(key, []))
+        if key == "record_target":
+            devices = _list_mic_sources()
+            if devices:
+                choices = ["default", *devices]
+        if choices:
+            items = [(v, "detect automatically" if v == "auto" else v)
+                     for v in choices]
+            values[key] = _popup_choice(stdscr, f" {label}:",
+                                        items, str(values[key]))
+            message = f"{key} = {_fmt_value(values[key])}"
+        elif conv is bool:
             prompt = (f" {label} — {desc}   now: {_fmt_value(values[key])}   "
                       f"[{fmt}]   space/y = yes · n = no · Esc = keep")
             try:
