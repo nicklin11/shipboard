@@ -288,47 +288,129 @@ if RECORD_TARGET.lower() in ("default", "auto", "system"):
     RECORD_TARGET = ""
 
 
+# --------------------------------------------------------------------------
+# Setup fields — structured section metadata (drives the categorized
+# nested menus in setup_tui: CLI + TUI mirror the same tree).
+#
+# Home screen shows the 5 named sections + "Advanced" collapsed behind [a].
+# Field tuple: (key, label, description, conv, accepted-format hint).
+# Section 1 ("Recording & keys") additionally holds the [[key_bind]] list,
+# edited as binds inside setup_tui (press-to-capture + action pickers).
+# --------------------------------------------------------------------------
+
+SECTION_RECORDING = "Recording & keys"
+SECTION_STT = "STT / whisper"
+SECTION_WAKE = "Wake words"
+SECTION_SENDING = "Sending"
+SECTION_SYSTEM = "System"
+SECTION_ADVANCED = "Advanced"
+
+_SETUP_SECTIONS = [
+    (SECTION_RECORDING, (
+        ("max_hold", "Max hold",
+         "Force-finish a stuck recording after this long", float, "seconds"),
+        ("min_recording", "Min recording",
+         "Shorter recordings are discarded as noise", float, "seconds"),
+        ("tap_stop_silence", "Tap stop silence",
+         "Tap-started recording auto-stops after this much silence",
+         float, "seconds, 0 disables"),
+    )),
+    (SECTION_STT, (
+        ("whisper_url", "STT server URL",
+         "Inference endpoint the daemon posts audio to", str, "http URL"),
+        ("whisper_health_url", "Health URL",
+         "Endpoint probed by 'test STT' and the status line", str, "http URL"),
+        ("whisper_container", "Container",
+         "Docker container to wake before recording", str, "container name"),
+        ("whisper_language", "Language",
+         "Whisper decode language", str, "auto / ru / en / ..."),
+        ("prompt", "Prompt",
+         "Optional initial hint sent with every request (domain vocabulary)",
+         str, "text"),
+        ("normalize", "Normalize text",
+         'Rewrite spoken phrases into symbols ("тильда слэш" -> "~/.config")',
+         bool, "y / n"),
+    )),
+    (SECTION_WAKE, (
+        ("wakeword_enabled", "Enabled",
+         "Listen for wake phrases in the background (engine WIP)", bool, "y / n"),
+        ("wakeword_record", "Phrases: record",
+         "Say these to record to clipboard only", str, "comma-separated phrases"),
+        ("wakeword_send", "Phrases: send",
+         "Say these to record + paste + Enter", str, "comma-separated phrases"),
+        ("wakeword_paste", "Phrases: paste",
+         "Say these to paste the clipboard", str, "comma-separated phrases"),
+        ("wakeword_sherpa_threshold", "Trigger threshold",
+         "Sherpa KWS trigger bar the keywords must clear",
+         float, "0..1, lower = easier"),
+        ("wakeword_sherpa_score", "Keyword score boost",
+         "Boost applied to matched keywords", float, "e.g. 1.0"),
+        ("wakeword_grace", "Grace",
+         "Keep recording through silence right after a trigger", float, "seconds"),
+        ("wakeword_stop_silence", "Stop on silence",
+         "Seconds of silence that end a wake recording", float, "seconds"),
+        ("wakeword_cooldown", "Cooldown",
+         "Ignore re-triggers for this long", float, "seconds"),
+        ("wakeword_debug", "Debug log",
+         "Log the mic level every second", bool, "y / n"),
+    )),
+    (SECTION_SENDING, (
+        ("paste_combo", "Paste combo",
+         "Modifier combo injected to paste (layout-proof)", str, "e.g. ctrl+shift+v"),
+        ("send_enter", "Enter after paste",
+         "Also press Enter after pasting", bool, "y / n"),
+        ("scroll_send_enter", "Enter after paste: Scroll Lock",
+         "Per-trigger Enter override for the Scroll Lock send", bool, "y / n"),
+        ("both_send_enter", "Enter after paste: combined",
+         "Per-trigger Enter override for the paste-after-record path", bool, "y / n"),
+    )),
+    (SECTION_SYSTEM, (
+        ("record_target", "Mic source",
+         "Recording source; default = the system default source",
+         str, 'device name or "default"'),
+        ("record_rate", "Sample rate",
+         "Sample rate for pw-record and the wake listener", int, "Hz, e.g. 16000"),
+        ("record_channels", "Channels",
+         "Channels for pw-record and the wake listener", int, "1 or 2"),
+        ("keep_audio_dir", "Keep recordings",
+         "Save raw recordings here instead of deleting", str, "directory, empty = delete"),
+        ("dry_run", "Dry run",
+         "Log actions but do not inject keys or paste", bool, "y / n"),
+    )),
+    (SECTION_ADVANCED, (
+        ("inject_backend", "Inject backend",
+         "Key injection implementation", str, "auto / uinput / wtype"),
+        ("notify_backend", "Notify backend",
+         "Desktop notification implementation", str, "auto / notify-send / ..."),
+        ("clipboard_backend", "Clipboard backend",
+         "Clipboard implementation", str, "auto / wl-copy / xclip"),
+        ("record_backend", "Record backend",
+         "Audio recording implementation", str, "auto / pw-record / ffmpeg"),
+        ("input_device_glob", "Input device glob",
+         "Restrict evdev device discovery by glob", str, "e.g. event*, empty = all"),
+        ("kws_threads", "KWS threads",
+         "onnxruntime threads for the wake listener", int, "number"),
+        ("wakeword_silence_level", "Silence RMS level",
+         "RMS below this counts as silence for wake recordings", float, "0..32768"),
+        ("wakeword_action", "Wake action",
+         "Action for wake words configured via wakeword_keywords only",
+         str, "record / record_send"),
+        ("idle_marker", "Idle marker",
+         "File touched when whisper goes idle", str, "path"),
+        ("lock_path", "Lock path",
+         "Flock file guarding a single recording", str, "path"),
+        ("daemon_lock_path", "Daemon lock path",
+         "Flock file guarding a single daemon instance", str, "path"),
+    )),
+]
+
+# Flat field table: (key, label, conv, section, description, format-hint).
+# Emitted by _save_config_file in this order — [[key_bind]] tables still go
+# LAST so bare keys after them are not swallowed by the TOML array.
 _SETUP_FIELDS = [
-    # ── Essential (most people only touch these) ──
-    ("paste_combo",        "Paste shortcut",                      str, "Essentials"),
-    ("send_enter",         "Press Enter after paste",             bool, "Essentials"),
-    ("normalize",          "Smart symbols  (тильда слэш -> ~/) ", bool, "Essentials"),
-    ("prompt",             "Whisper prompt  (domain words, optional)", str, "Essentials"),
-    ("whisper_language",   "Language  (auto / ru / en / ...)",    str, "Essentials"),
-    # ── Recording (rarely tweaked) ──
-    ("max_hold",           "Max hold  (stuck guard, seconds)",    float, "Recording"),
-    ("min_recording",      "Ignore shorter than  (seconds)",      float, "Recording"),
-    ("record_target",      "Mic source  (default = system)",      str, "Recording"),
-    # (keys configured via [[key_bind]] — use the Keys screen [k])
-    # ── Behind "Advanced" ──
-    ("whisper_url",        "STT server URL",                      str, "Advanced"),
-    ("whisper_health_url", "Health URL",                          str, "Advanced"),
-    ("whisper_container",  "Docker container to wake",            str, "Advanced"),
-    ("record_rate",        "Sample rate",                         int, "Advanced"),
-    ("record_channels",    "Channels",                            int, "Advanced"),
-    # Wake words
-    ("wakeword_enabled",   "Wake word listener (engine WIP)",    bool, "Advanced"),
-    ("wakeword_cooldown",  "Wake word cooldown, seconds",        float, "Advanced"),
-    ("wakeword_grace",     "Wake word grace, seconds",           float, "Advanced"),
-    ("tap_stop_silence",   "Tap record auto-stop silence, s (0=off)", float, "Advanced"),
-    ("wakeword_stop_silence", "Wake word stop on silence, s",    float, "Advanced"),
-    ("wakeword_action",    "Wake word action (record/record_send)", str, "Advanced"),
-    ("wakeword_silence_level", "Wake word silence RMS level",    float, "Advanced"),
-    ("wakeword_sherpa_score", "Sherpa KWS score boost (sensitivity)", float, "Advanced"),
-    ("wakeword_sherpa_threshold", "Sherpa KWS threshold (lower=easier)", float, "Advanced"),
-    ("kws_threads",        "Sherpa KWS onnxruntime threads",     int, "Advanced"),
-    ("wakeword_record",    "Wake word: record (copy only)",        str, "Advanced"),
-    ("wakeword_send",      "Wake word: record+send (paste+Enter)", str, "Advanced"),
-    ("wakeword_paste",     "Wake word: paste (clipboard)",         str, "Advanced"),
-    ("wakeword_debug",     "Wake word mic level log",             bool, "Advanced"),
-    # Platform
-    ("keep_audio_dir",     "Keep recordings in dir ('' = delete)", str, "Advanced"),
-    ("dry_run",            "Dry run (log actions, do nothing)",    bool, "Advanced"),
-    ("inject_backend",     "Key inject backend (auto/uinput/wtype)", str, "Advanced"),
-    ("notify_backend",     "Notify backend (auto/notify-send/...)", str, "Advanced"),
-    ("clipboard_backend",  "Clipboard backend (auto/wl-copy/xclip)", str, "Advanced"),
-    ("record_backend",     "Record backend (auto/pw-record/ffmpeg)", str, "Advanced"),
-    ("input_device_glob",  "Input device glob (evdev, e.g. event*)", str, "Advanced"),
+    (key, label, conv, section, desc, fmt)
+    for section, fields in _SETUP_SECTIONS
+    for (key, label, desc, conv, fmt) in fields
 ]
 
 
@@ -368,6 +450,13 @@ def _field_defaults() -> dict:
         "clipboard_backend": "auto",
         "record_backend": "auto",
         "input_device_glob": "",
+        # per-trigger "Enter after paste" overrides (Sending section)
+        "scroll_send_enter": True,
+        "both_send_enter": True,
+        # Advanced paths (same defaults as the module constants above)
+        "idle_marker": "/tmp/whisper-local-last-use",
+        "lock_path": "/tmp/shipboard.lock",
+        "daemon_lock_path": "/tmp/shipboard.daemon.lock",
     }
 
 
@@ -391,7 +480,7 @@ def _save_config_file(values: dict) -> None:
         "# Precedence: defaults < this file < environment variables.",
         "",
     ]
-    for key, _label, conv, _section in _SETUP_FIELDS:
+    for key, _label, conv, _section, _desc, _fmt in _SETUP_FIELDS:
         v = values[key]
         if conv is str:
             lines.append(f'{key} = "{v}"')

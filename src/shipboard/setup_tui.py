@@ -1,4 +1,17 @@
-"""Interactive setup: curses TUI + numbered CLI dialog."""
+"""Interactive setup: categorized nested menu — curses TUI + numbered CLI.
+
+Both interfaces mirror the same tree (see config._SETUP_SECTIONS):
+
+  shipboard setup / tui
+   1) Recording & keys   [[key_bind]] list (press-to-capture, add/edit/remove)
+                         + max_hold, min_recording, tap_stop_silence
+   2) STT / whisper      urls, container, language, prompt, normalize
+   3) Wake words         enable, phrases, sherpa tuning, cooldown/grace
+   4) Sending            paste combo + per-trigger Enter overrides
+   5) System             mic source, rate/channels, keep-audio, dry run
+   a) Advanced           collapsed: backends, device glob, kws knobs, paths
+   s) save   r) restart daemon   t) test STT   q) quit
+"""
 
 from __future__ import annotations
 
@@ -9,34 +22,17 @@ from urllib import request as urllib_request
 
 from .config import (DEFAULT_CONFIG_PATH, DEFAULT_CONFIG_TEXT, MAX_HOLD,
                      MIN_RECORDING, NORMALIZE, PASTE_COMBO, SEND_ENTER,
-                     WHISPER_URL, _CFG, _SETUP_FIELDS, _field_defaults,
+                     WHISPER_URL, _CFG, _SETUP_FIELDS, _SETUP_SECTIONS,
+                     SECTION_ADVANCED, SECTION_RECORDING, _field_defaults,
                      _fmt_value, _parse_value, _save_config_file,
                      _setup_prefill)
 from .keys import _key_code, _key_label
 from .logstate import _daemon_running
 
-def _config_main() -> int:
-    if not DEFAULT_CONFIG_PATH.is_file():
-        DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        DEFAULT_CONFIG_PATH.write_text(DEFAULT_CONFIG_TEXT)
-        print(f"created:   {DEFAULT_CONFIG_PATH}")
-        print("edit it, then restart the daemon")
-    else:
-        print(f"config:    {DEFAULT_CONFIG_PATH}")
-    print(f"stt:       {WHISPER_URL}")
-    print(f"paste:     {PASTE_COMBO}{' + Enter' if SEND_ENTER else ''}")
-    print(f"recording: max_hold {MAX_HOLD}s, min {MIN_RECORDING}s")
-    print(f"normalize: {'on' if NORMALIZE else 'off'}")
-    return 0
-
-
-def _health_check(url: str) -> str:
-    try:
-        with urllib_request.urlopen(url, timeout=3) as resp:
-            return "OK" if 200 <= resp.status < 300 else f"HTTP {resp.status}"
-    except Exception as exc:
-        return f"FAIL: {exc}"
-
+# Sections shown on the home screen, in menu order; Advanced stays collapsed.
+TOP_SECTIONS = tuple(s for s, _fields in _SETUP_SECTIONS
+                     if s != SECTION_ADVANCED)
+KEYS_SECTION = SECTION_RECORDING
 
 _COMPOSITOR_SNIPPETS = """\
 Bind the keys to a no-op in your compositor so they don't leak into apps
@@ -54,270 +50,369 @@ Hyprland:
 """
 
 
-def _setup_main() -> int:
-    """Interactive CLI menu (no curses — inherits the terminal theme)."""
+# ---------------------------------------------------------------------------
+# Shared model helpers (used by both the CLI and the TUI)
+# ---------------------------------------------------------------------------
+
+def _config_main() -> int:
+    if not DEFAULT_CONFIG_PATH.is_file():
+        DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DEFAULT_CONFIG_PATH.write_text(DEFAULT_CONFIG_TEXT)
+        print(f"created:   {DEFAULT_CONFIG_PATH}")
+        print("edit it, then restart the daemon")
+    else:
+        print(f"config:    {DEFAULT_CONFIG_PATH}")
+    print(f"stt:       {WHISPER_URL}")
+    print(f"paste:     {PASTE_COMBO}{' + Enter' if SEND_ENTER else ''}")
+    print(f"recording: max_hold {MAX_HOLD}s, min {MIN_RECORDING}s")
+    print(f"normalize: {'on' if NORMALIZE else 'off'}")
+    return 0
+
+
+def _health_check(url: str, timeout: float = 3.0) -> str:
+    try:
+        with urllib_request.urlopen(url, timeout=timeout) as resp:
+            return "OK" if 200 <= resp.status < 300 else f"HTTP {resp.status}"
+    except Exception as exc:
+        return f"FAIL: {exc}"
+
+
+def _restart_msg() -> str:
     from .cli import _restart_daemon  # deferred: cli imports this module at load time (cycle)
+    return _restart_daemon()
+
+
+def _section_fields(section: str) -> list:
+    """[(flat index into _SETUP_FIELDS, field 6-tuple), ...] for one section."""
+    return [(i, f) for i, f in enumerate(_SETUP_FIELDS) if f[3] == section]
+
+
+def _bind_summary(b: dict) -> str:
+    """One-line bind summary: toggle/hold/tap in daemon precedence order."""
+    segs = []
+    if b.get("toggle"):
+        segs.append(f"toggle={b['toggle']}")
+    if b.get("hold"):
+        segs.append(f"hold={b['hold']}@{b.get('hold_threshold', 0.25):g}s")
+    if b.get("tap"):
+        segs.append(f"tap={b['tap']}")
+    return " · ".join(segs) if segs else "(off)"
+
+
+def _binds_line(values: dict) -> str:
+    binds = values.get("_key_binds") or []
+    if not binds:
+        return "no keys yet"
+    return "  |  ".join(f"{_key_label(b['key'])}: {_bind_summary(b)}"
+                        for b in binds)
+
+
+# ---------------------------------------------------------------------------
+# CLI: press-to-capture + action pickers + bind list operations
+# (the curses twins live inside _tui_main: _capture_key / _choose_action)
+# ---------------------------------------------------------------------------
+
+def _capture_key_cli() -> str | None:
+    """Press-to-capture (evdev); returns the key name or None."""
+    print(" Press the key to bind (8s, Esc cancels)…")
+    try:
+        import evdev
+        import select
+        devs = []
+        for path in evdev.list_devices():
+            try:
+                d = evdev.InputDevice(path)
+                caps = d.capabilities(verbose=False)
+                if caps.get(evdev.ecodes.EV_KEY):
+                    devs.append(d)
+            except Exception:
+                continue
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            r, _, _ = select.select(devs, [], [], 0.1)
+            for d in r:
+                try:
+                    for ev in d.read():
+                        if ev.type == evdev.ecodes.EV_KEY and ev.value == 1:
+                            raw = None
+                            if hasattr(evdev.ecodes, "KEY"):
+                                raw = evdev.ecodes.KEY.get(ev.code)
+                            if raw is None:
+                                for attr in dir(evdev.ecodes):
+                                    if attr.startswith("KEY_") and \
+                                            getattr(evdev.ecodes, attr) == ev.code:
+                                        raw = attr
+                                        break
+                            name = raw[4:].lower() if raw and raw.startswith("KEY_") \
+                                else str(ev.code)
+                            print(f"  captured: {name} ({_key_label(name)})")
+                            return name
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return None
+
+
+_ACTIONS_CLI = (("record", "copy only"), ("record_send", "copy+paste+Enter"),
+                ("paste", "paste clipboard"), ("", "off"))
+
+
+def _pick_action_cli(prompt: str, default: str = "") -> str:
+    print(f"  {prompt}")
+    for i, (v, lbl) in enumerate(_ACTIONS_CLI, start=1):
+        cur = " ←" if v == default else ""
+        print(f"   {i}) {v or 'off':14} {lbl}{cur}")
+    raw = input("  choose 1-4 [Enter keeps]: ").strip()
+    if not raw:
+        return default
+    try:
+        idx = int(raw) - 1
+        if 0 <= idx < len(_ACTIONS_CLI):
+            return _ACTIONS_CLI[idx][0]
+    except ValueError:
+        low = raw.lower()
+        if low in ("off", "-", ""):
+            return ""
+        if low in ("record", "record_send", "paste"):
+            return low
+    return default
+
+
+def _ask_threshold_cli(default: float) -> float | None:
+    """Per-bind hold threshold; Enter keeps the default, bad input -> None."""
+    raw = input(f"  hold threshold [{default:g}] > ").strip()
+    if not raw:
+        return default
+    try:
+        thr = float(raw)
+        if 0 < thr <= 5:
+            return thr
+    except ValueError:
+        pass
+    return None
+
+
+def _add_bind_cli(binds: list) -> str:
+    cap = _capture_key_cli()
+    k = cap or input("  key (e.g. rightalt/f13) > ").strip().lower()
+    if not k:
+        return "no key given"
+    try:
+        _key_code(k)
+    except SystemExit as e:
+        return str(e)
+    if any(b.get("key") == k for b in binds):
+        return f"duplicate key {k!r} — each key once"
+    tap = _pick_action_cli("tap (short press) —", "")
+    hold = _pick_action_cli("hold (long press) —", "")
+    tog = _pick_action_cli("toggle (press to start/stop) —", "")
+    thr = _ask_threshold_cli(0.25)
+    if thr is None:
+        return "bad threshold (0..5) — bind not added"
+    binds.append({"key": k, "tap": tap, "hold": hold,
+                  "toggle": tog, "hold_threshold": thr})
+    return (f"added {k}  tap={tap or 'off'} hold={hold or 'off'} "
+            f"toggle={tog or 'off'} @{thr:g}s")
+
+
+def _edit_bind_cli(binds: list) -> str:
+    if not binds:
+        return "no binds yet — add one first ([n])"
+    for i, b in enumerate(binds, start=1):
+        print(f"   {i}. {_key_label(b['key']):<14} {_bind_summary(b)}")
+    raw = input("  edit which > ").strip()
+    try:
+        b = binds[int(raw) - 1]
+    except (ValueError, IndexError):
+        return "invalid index"
+    print(f"  editing {b['key']} — press new key or Enter keeps")
+    cap = _capture_key_cli()
+    nk = cap or input(f"   key [{b['key']}] > ").strip().lower() or b["key"]
+    if nk != b["key"] and any(x is not b and x.get("key") == nk for x in binds):
+        return f"duplicate key {nk!r}"
+    try:
+        _key_code(nk)
+    except SystemExit as e:
+        return str(e)
+    b["tap"] = _pick_action_cli(f"tap (was {b.get('tap') or 'off'}) —", b.get("tap", ""))
+    b["hold"] = _pick_action_cli(f"hold (was {b.get('hold') or 'off'}) —", b.get("hold", ""))
+    b["toggle"] = _pick_action_cli(f"toggle (was {b.get('toggle') or 'off'}) —",
+                                   b.get("toggle", ""))
+    thr = _ask_threshold_cli(b.get("hold_threshold", 0.25))
+    if thr is not None:
+        b["hold_threshold"] = thr
+    b["key"] = nk
+    return f"updated {nk}"
+
+
+def _remove_bind_cli(binds: list) -> str:
+    if not binds:
+        return "no binds"
+    for i, b in enumerate(binds, start=1):
+        print(f"   {i}. {_key_label(b['key']):<14} {b['key']}")
+    raw = input("  remove which > ").strip()
+    try:
+        b = binds.pop(int(raw) - 1)
+    except (ValueError, IndexError):
+        return "invalid index"
+    return f"removed {b['key']}"
+
+
+def _cli_edit_field(values: dict, field: tuple) -> str:
+    """Field edit prompt: name, one-line 'what it does', current, format."""
+    key, label, conv, _section, desc, fmt = field
+    cur = _fmt_value(values[key])
+    print(f"\n  {label} — {desc}")
+    print(f"  current: {cur}   accepted: {fmt}")
+    if conv is bool:
+        ans = input(f"  {label} [{cur}] (y/n, Enter=keep): ").strip().lower()
+        if ans in ("y", "yes", "on", "1"):
+            values[key] = True
+            return f"{key} = yes"
+        if ans in ("n", "no", "off", "0"):
+            values[key] = False
+            return f"{key} = no"
+        return f"{key} unchanged"
+    raw = input(f"  {label} [{cur}] > ").strip()
+    if not raw:
+        return f"{key} unchanged"
+    try:
+        values[key] = _parse_value(raw, conv)
+    except ValueError:
+        return "invalid value, not saved"
+    return f"{key} = {_fmt_value(values[key])}"
+
+
+# ---------------------------------------------------------------------------
+# CLI: categorized nested menu (`shipboard setup` without a tty / --cli)
+# ---------------------------------------------------------------------------
+
+def _setup_main() -> int:
+    """Numbered CLI menu mirroring the TUI tree: section number -> field number."""
     values = _field_defaults()
     values.update(_CFG)
     _setup_prefill(values)
-    def _capture_key_cli() -> str | None:
-        hint = "Press the key to bind (8s, Esc cancels)…"
-        print(f" {hint}")
-        try:
-            import evdev, select
-            devs = []
-            for path in evdev.list_devices():
-                try:
-                    d = evdev.InputDevice(path)
-                    caps = d.capabilities(verbose=False)
-                    if caps.get(evdev.ecodes.EV_KEY):
-                        devs.append(d)
-                except Exception:
-                    continue
-            import time as _time
-            deadline = _time.monotonic() + 8
-            while _time.monotonic() < deadline:
-                r,_,_ = select.select(devs, [], [], 0.1)
-                for d in r:
-                    try:
-                        for ev in d.read():
-                            if ev.type == evdev.ecodes.EV_KEY and ev.value == 1:
-                                raw = None
-                                if hasattr(evdev.ecodes, "KEY"):
-                                    raw = evdev.ecodes.KEY.get(ev.code)
-                                if raw is None:
-                                    for attr in dir(evdev.ecodes):
-                                        if attr.startswith("KEY_") and getattr(evdev.ecodes, attr) == ev.code:
-                                            raw = attr; break
-                                name = raw[4:].lower() if raw and raw.startswith("KEY_") else str(ev.code)
-                                print(f"  captured: {name} ({_key_label(name)})")
-                                return name
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        return None
+    stt_cache: list = []  # one startup probe; [t] refreshes (short timeout: never block the first render)
 
-    def _pick_action_cli(prompt, default=""):
-        opts = [("record","copy only"), ("record_send","copy+paste+Enter"), ("paste","paste clipboard"), ("","off")]
-        # show numbered picker
-        print(f"  {prompt}")
-        for i,(v,lbl) in enumerate(opts, start=1):
-            cur = " ←" if v==default else ""
-            print(f"   {i}) {v or 'off':14} {lbl}{cur}")
-        raw = input("  choose 1-4 [Enter keeps]: ").strip()
-        if not raw:
-            return default
-        try:
-            idx = int(raw)-1
-            if 0 <= idx < len(opts):
-                return opts[idx][0]
-        except ValueError:
-            low = raw.lower()
-            if low in ("off","-",""): return ""
-            if low in ("record","record_send","paste"): return low
-        return default
+    def _stt_line() -> str:
+        if not stt_cache:
+            stt_cache.append(_health_check(values["whisper_health_url"], timeout=1))
+        return stt_cache[0]
 
-    show_advanced = False
     message = ""
     while True:
-        print("\n" + "─" * 60)
-        print(f" shipboard setup — {DEFAULT_CONFIG_PATH}   (daemon: {'on' if _daemon_running() else 'off'})")
-        print("─" * 60)
-        # ── Keys quick-card (always on top — this is what people tweak most) ──
-        binds = values.get("_key_binds") or []
-        if binds:
-            print("  Keys  (tap = short press, hold = long press, toggle = press to start/stop)")
-            for idx, b in enumerate(binds, start=1):
-                tap = b.get("tap",""); hold = b.get("hold",""); tog = b.get("toggle","")
-                thr = b.get("hold_threshold", 0.25)
-                parts = []
-                if tog: parts.append(f"toggle={tog}")
-                if hold: parts.append(f"hold {hold} @ {thr:g}s")
-                if tap: parts.append(f"tap {tap}")
-                hint = "  (toggle overrides tap)" if tog and (tap or hold) else ""
-                print(f"   • {_key_label(b.get('key','')):<12}  {'  ·  '.join(parts) if parts else '(off)'}{hint}")
-        else:
-            print("  Keys  (none yet — add your first binding)")
-
-        print("     [k] keys: add / edit / remove")
-        # ── Essentials + Recording + collapsed sections ──
-        last_section = None
-        for i, (key, label, conv, section) in enumerate(_SETUP_FIELDS, start=1):
-            is_adv = (section == "Advanced")
-            if is_adv:
-                if not show_advanced and section != last_section:
-                    adv_count = sum(1 for _,_,_,s in _SETUP_FIELDS if s == "Advanced")
-                    print(f"\n  … Advanced  ({adv_count} settings)  [a] show / hide")
-                    last_section = section
-                    continue
-                elif not show_advanced:
-                    last_section = section
-                    continue
-            if section != last_section:
-                print(f"\n  == {section} ==")
-                last_section = section
-            mark = "*" if key in _CFG else " "
-            print(f" {i:2}) {mark} {label:<40} {_fmt_value(values[key])}")
-        print("─" * 60)
-        print(" [num] edit setting  ·  [k] keys  ·  [a] advanced  ·  [s] save  ·  [t] test STT  ·  [p] compositor"
-              "  ·  [r] restart  ·  [q] quit")
+        print("\n" + "─" * 64)
+        print(f" shipboard setup — {DEFAULT_CONFIG_PATH}")
+        print(f" daemon: {'running' if _daemon_running() else 'off'}"
+              f"   ·   stt: {_stt_line()}")
+        print("─" * 64)
+        for n, name in enumerate(TOP_SECTIONS, start=1):
+            extra = f"   {_binds_line(values)}" if name == KEYS_SECTION else ""
+            print(f" {n}) {name:<18} {len(_section_fields(name))} settings{extra}")
+        n_adv = len(_section_fields(SECTION_ADVANCED))
+        print(f" a) Advanced — collapsed ({n_adv} settings)   [a] to open")
+        print("─" * 64)
+        print(" [1-5] section · [a] advanced · [s] save · [t] test STT ·"
+              " [r] restart · [q] quit")
         if message:
             print(f" {message}")
+            message = ""
         try:
             choice = input(" > ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
-        message = ""
         if choice in ("q", "quit", "exit"):
             return 0
-        if choice == "a":
-            show_advanced = not show_advanced
-            message = "advanced shown" if show_advanced else "advanced hidden"
-        elif choice == "k":
-            binds = values.setdefault("_key_binds", [])
-            while True:
-                print("\n" + "─"*50)
-                print(" Keys  (SEPARATE PAGE — press to capture, then pick tap/hold/toggle one by one)")
-                if not binds:
-                    print("  (no keys — press a to add)")
-                else:
-                    for i, b in enumerate(binds, start=1):
-                        tap = b.get("tap","") or "off"; hold = b.get("hold","") or "off"; tog = b.get("toggle","") or "off"; thr = b.get("hold_threshold",0.25)
-                        print(f"  {i}. {_key_label(b['key']):12}  tap={tap:12}  hold={hold:12}@{thr:g}s  toggle={tog:12}")
-                    print("  toggle overrides tap; hold+tap idempotent")
-                print("  [a] add (press key)  [e] edit  [d] delete  [q] back")
-                sub = input(" keys> ").strip().lower()
-                if sub in ("q", "back", "b", ""):
-                    break
-                if sub in ("a", "1"):
-                    cap = _capture_key_cli()
-                    k = (cap or input(" key (e.g. rightalt/f13) > ").strip().lower())
-                    if not k:
-                        message = "no key given"
-                    else:
-                        try:
-                            _key_code(k)
-                        except SystemExit as e:
-                            message = str(e)
-                        else:
-                            if any(b.get("key")==k for b in binds):
-                                message = f"duplicate key {k!r} — each key once"
-                            else:
-                                tap = _pick_action_cli("tap (short press) —", "")
-                                hold = _pick_action_cli("hold (long press) —", "")
-                                tog = _pick_action_cli("toggle (press to start/stop) —", "")
-                                thr_raw = input("  hold threshold [0.25] > ").strip() or "0.25"
-                                try:
-                                    thr = float(thr_raw)
-                                    assert 0 < thr <= 5
-                                except Exception:
-                                    message = "bad threshold (0..5)"
-                                else:
-                                    binds.append({"key":k,"tap":tap,"hold":hold,"toggle":tog,"hold_threshold":thr})
-                                    message = f"added {k}  tap={tap or 'off'} hold={hold or 'off'} toggle={tog or 'off'}"
-                elif sub in ("e", "2"):
-                    if not binds:
-                        message = "no binds yet — add one first"
-                    else:
-                        for i,b in enumerate(binds, start=1):
-                            print(f"  {i}) {_key_label(b['key']):12}  tap={b.get('tap','') or 'off'}  hold={b.get('hold','') or 'off'}  toggle={b.get('toggle','') or 'off'}  @{b.get('hold_threshold',0.25):g}s")
-                        raw = input(" edit which > ").strip()
-                        try:
-                            idx = int(raw)-1
-                            b = binds[idx]
-                        except Exception:
-                            message = "invalid index"
-                        else:
-                            print(f" editing {b['key']} — press new key or Enter keeps")
-                            cap = _capture_key_cli()
-                            nk = (cap or input(f"  key [{b['key']}] > ").strip().lower() or b['key'])
-                            if nk != b['key'] and any(x.get("key")==nk for x in binds):
-                                message = f"duplicate key {nk!r}"
-                            else:
-                                try:
-                                    _key_code(nk)
-                                except SystemExit as e:
-                                    message = str(e)
-                                else:
-                                    b["tap"] = _pick_action_cli(f"tap (was {b.get('tap','') or 'off'}) —", b.get('tap',''))
-                                    b["hold"] = _pick_action_cli(f"hold (was {b.get('hold','') or 'off'}) —", b.get('hold',''))
-                                    b["toggle"] = _pick_action_cli(f"toggle (was {b.get('toggle','') or 'off'}) —", b.get('toggle',''))
-                                    thr_raw = input(f"  threshold [{b.get('hold_threshold',0.25):g}] > ").strip()
-                                    if thr_raw:
-                                        try:
-                                            b["hold_threshold"] = float(thr_raw)
-                                        except Exception:
-                                            message = "bad threshold, kept old"
-                                    b["key"] = nk
-                                    if "bad threshold" not in (message or ""):
-                                        message = f"updated {nk}"
-                elif sub in ("d", "3"):
-                    if not binds:
-                        message = "no binds"
-                    else:
-                        for i,b in enumerate(binds, start=1):
-                            print(f"  {i}) {_key_label(b['key']):12} {b['key']}")
-                        raw = input(" remove which > ").strip()
-                        try:
-                            idx = int(raw)-1
-                            b = binds.pop(idx)
-                            message = f"removed {b['key']}"
-                        except Exception:
-                            message = "invalid index"
-                else:
-                    if sub:
-                        print(f"  unknown: {sub}")
-        elif choice == "s":
+        if choice == "s":
             _save_config_file(values)
             message = f"saved to {DEFAULT_CONFIG_PATH} — restart the daemon to apply (r)"
         elif choice == "t":
             message = "STT health: " + _health_check(values["whisper_health_url"])
-        elif choice == "p":
-            print("\n" + _COMPOSITOR_SNIPPETS)
-            input(" [press Enter to return] ")
         elif choice == "r":
-            message = _restart_daemon()
-        elif choice.isdigit():
-            i = int(choice) - 1
-            if 0 <= i < len(_SETUP_FIELDS):
-                key, label, conv, _section = _SETUP_FIELDS[i]
-                cur = _fmt_value(values[key])
-                if conv is bool:
-                    ans = input(f" {label} [{cur}] (y/n, Enter=keep): ").strip().lower()
-                    if ans in ("y", "yes", "on", "1"):
-                        values[key] = True
-                        message = f"{key} = yes"
-                    elif ans in ("n", "no", "off", "0"):
-                        values[key] = False
-                        message = f"{key} = no"
-                    else:
-                        message = f"{key} unchanged"
-                else:
-                    raw = input(f" {label} [{cur}] > ").strip()
-                    if not raw:
-                        message = f"{key} unchanged"
-                    else:
-                        try:
-                            values[key] = _parse_value(raw, conv)
-                            message = f"{key} = {_fmt_value(values[key])}"
-                        except ValueError:
-                            message = "invalid value, not saved"
-            else:
-                message = "no such field"
+            message = _restart_msg()
+        elif choice == "a":
+            _cli_section_loop(values, SECTION_ADVANCED)
+        elif choice.isdigit() and 1 <= int(choice) <= len(TOP_SECTIONS):
+            _cli_section_loop(values, TOP_SECTIONS[int(choice) - 1])
         else:
             message = f"unknown command: {choice}"
 
 
-def _tui_main() -> int:
-    """Full-screen curses editor for _SETUP_FIELDS (alternative to `setup`).
+def _cli_section_loop(values: dict, section: str) -> None:
+    """One section page of the CLI. Numbers edit that section's fields;
+    section 1 also exposes the key_bind list via n/e/d/c."""
+    fields = _section_fields(section)
+    is_keys = section == KEYS_SECTION
+    message = ""
+    while True:
+        print("\n" + "─" * 64)
+        print(f" == {section} ==")
+        if section == SECTION_ADVANCED:
+            print("  (backends & paths — keep 'auto' unless something breaks)")
+        binds = values.get("_key_binds") or []
+        if is_keys:
+            print("  keys — one line per [[key_bind]] (press-to-capture):")
+            if binds:
+                for i, b in enumerate(binds, start=1):
+                    print(f"   {i}. {_key_label(b['key']):<14} {_bind_summary(b)}")
+            else:
+                print("   (none — [n] add: press the key, then pick tap/hold/toggle)")
+            print("   [n] add bind · [e] edit bind · [d] delete bind ·"
+                  " [c] compositor hints")
+            print("  fields:")
+        for i, (_idx, f) in enumerate(fields, start=1):
+            key, label, _conv, _sec, desc, fmt = f
+            mark = "*" if key in _CFG else " "
+            print(f"  {i:2}){mark} {label:<26} — {desc}")
+            print(f"        now: {_fmt_value(values[key])}   [{fmt}]")
+        print("  " + "─" * 60)
+        print("  [num] edit field · [s] save · [t] test STT · [r] restart · [q] back")
+        if message:
+            print(f"  {message}")
+            message = ""
+        try:
+            choice = input(" > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if choice in ("q", "b", "back", ""):
+            return
+        if choice == "s":
+            _save_config_file(values)
+            message = f"saved to {DEFAULT_CONFIG_PATH} — restart the daemon to apply (r)"
+        elif choice == "t":
+            message = "STT health: " + _health_check(values["whisper_health_url"])
+        elif choice == "r":
+            message = _restart_msg()
+        elif is_keys and choice == "n":
+            message = _add_bind_cli(values.setdefault("_key_binds", []))
+        elif is_keys and choice == "e":
+            message = _edit_bind_cli(values.setdefault("_key_binds", []))
+        elif is_keys and choice == "d":
+            message = _remove_bind_cli(values.setdefault("_key_binds", []))
+        elif is_keys and choice == "c":
+            print("\n" + _COMPOSITOR_SNIPPETS)
+            input(" [press Enter to return] ")
+        elif choice.isdigit():
+            n = int(choice)
+            if 1 <= n <= len(fields):
+                message = _cli_edit_field(values, fields[n - 1][1])
+            else:
+                message = f"no field #{choice} — 1..{len(fields)}"
+        else:
+            message = f"unknown command: {choice}"
 
-    ↑/↓ navigate · Enter edit · Space/y/n toggle bools · s save ·
-    t test STT · p compositor binds · r restart daemon · q quit.
-    Falls back to `shipboard setup` when curses is unavailable.
-    """
-    from .cli import _restart_daemon  # deferred: cli imports this module at load time (cycle)
+
+# ---------------------------------------------------------------------------
+# TUI (curses): same tree as full-screen pages
+# ---------------------------------------------------------------------------
+
+def _tui_main() -> int:
+    """Full-screen curses setup — home shows the 5 sections + collapsed
+    Advanced; section 1 holds the [[key_bind]] list. ↑/↓ navigate, Enter
+    open/edit, s save, t test STT, r restart, q/Esc back (quit from home).
+    Falls back to `shipboard setup` when curses is unavailable."""
     try:
         import curses
     except ImportError:
@@ -330,91 +425,58 @@ def _tui_main() -> int:
     values = _field_defaults()
     values.update(_CFG)
     _setup_prefill(values)
-    show_advanced = False  # TUI also collapses Advanced by default
-
-    def _build_rows():
-        rows_ = []
-        # Keys card as a navigable row (not a SETUP_FIELD)
-        rows_.append(("keys", None))
-        last_sec = None
-        for i, (key, label, conv, section) in enumerate(_SETUP_FIELDS):
-            if section == "Advanced" and not show_advanced:
-                if last_sec != "Advanced":
-                    rows_.append(("section", "… Advanced  [a] show/hide"))
-                    last_sec = "Advanced"
-                continue
-            if section != last_sec:
-                rows_.append(("section", section))
-                last_sec = section
-            rows_.append(("field", i))
-        return rows_
-
-    rows = _build_rows()
-
-    def _next_field(sel: int, step: int) -> int:
-        i = sel + step
-        while 0 <= i < len(rows) and rows[i][0] not in ("field", "keys"):
-            i += step
-        return i if 0 <= i < len(rows) else sel
-
-    def _keys_summary() -> str:
-        binds = values.get("_key_binds") or []
-        if not binds:
-            return "Keys: (none yet — press k to add)"
-        parts = []
-        for b in binds:
-            tap = b.get("tap",""); hold = b.get("hold",""); tog = b.get("toggle",""); thr = b.get("hold_threshold",0.25)
-            segs = []
-            if tog: segs.append(f"toggle={tog}")
-            if hold: segs.append(f"hold {hold}@{thr:g}s")
-            if tap: segs.append(f"tap {tap}")
-            label = _key_label(b.get("key",""))
-            parts.append(f"{label}: {' · '.join(segs) if segs else '(off)'}")
-        return "Keys: " + "  |  ".join(parts)
 
     def _prompt_line(stdscr_, prompt, default=""):
         h_, w_ = stdscr_.getmaxyx()
         try:
-            stdscr_.move(h_-1, 0); stdscr_.clrtoeol()
-            stdscr_.addnstr(h_-1, 0, prompt + (f" [{default}]" if default else "") + " ", w_-1)
-            stdscr_.noutrefresh(); curses.doupdate()
+            stdscr_.move(h_ - 1, 0)
+            stdscr_.clrtoeol()
+            stdscr_.addnstr(h_ - 1, 0,
+                            prompt + (f" [{default}]" if default else "") + " ", w_ - 1)
+            stdscr_.noutrefresh()
+            curses.doupdate()
         except curses.error:
             pass
         curses.echo()
-        try: curses.curs_set(1)
-        except curses.error: pass
         try:
-            raw = stdscr_.getstr(h_-1, len(prompt)+2 + (len(default)+3 if default else 1), 50)
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        try:
+            raw = stdscr_.getstr(h_ - 1,
+                                 len(prompt) + 2 + (len(default) + 3 if default else 1), 50)
             s = raw.decode(errors="replace").strip()
         except curses.error:
             s = ""
         finally:
             curses.noecho()
-            try: curses.curs_set(0)
-            except curses.error: pass
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
         return s if s else default
 
     def _capture_key(stdscr_) -> str | None:
-        # Wait for next evdev press and return its key name; fallback to curses if no device
+        """Press-to-capture: wait for the next evdev press; Esc cancels."""
         hint = "Press the key to bind  (Esc cancels)…"
         h_, w_ = stdscr_.getmaxyx()
         try:
-            stdscr_.move(h_-1, 0); stdscr_.clrtoeol()
-            stdscr_.addnstr(h_-1, 0, hint, w_-1)
-            stdscr_.noutrefresh(); curses.doupdate()
+            stdscr_.move(h_ - 1, 0)
+            stdscr_.clrtoeol()
+            stdscr_.addnstr(h_ - 1, 0, hint, w_ - 1)
+            stdscr_.noutrefresh()
+            curses.doupdate()
         except curses.error:
             pass
         try:
             import evdev
             import select
-            wanted = set()
             devs = []
             for path in evdev.list_devices():
                 try:
                     d = evdev.InputDevice(path)
                     caps = d.capabilities(verbose=False)
-                    keys = caps.get(evdev.ecodes.EV_KEY, [])
-                    if keys:
+                    if caps.get(evdev.ecodes.EV_KEY):
                         devs.append(d)
                 except Exception:
                     continue
@@ -430,12 +492,13 @@ def _tui_main() -> int:
                                 rev = {v: k for k, v in name_to_code.items()}
                                 raw = rev.get(ev.code)
                                 if raw is None:
-                                    # fallback: scan KEY_* attributes
                                     for attr in dir(evdev.ecodes):
-                                        if attr.startswith("KEY_") and getattr(evdev.ecodes, attr) == ev.code:
+                                        if attr.startswith("KEY_") and \
+                                                getattr(evdev.ecodes, attr) == ev.code:
                                             raw = attr
                                             break
-                                name = raw[4:].lower() if raw and raw.startswith("KEY_") else str(ev.code)
+                                name = raw[4:].lower() if raw and raw.startswith("KEY_") \
+                                    else str(ev.code)
                                 return name
                     except Exception:
                         pass
@@ -443,250 +506,218 @@ def _tui_main() -> int:
                 try:
                     stdscr_.nodelay(True)
                     ch = stdscr_.getch()
-                    stdscr_.nodelay(False)
                     if ch == 27:
                         return None
-                    if ch != -1:
-                        stdscr_.nodelay(False)
-                        # ignore
-                        pass
-                except curses.error:
-                    pass
-                try:
+                finally:
                     stdscr_.nodelay(False)
-                except curses.error:
-                    pass
-            stdscr_.nodelay(False)
-            return None
         except Exception:
-            try:
-                stdscr_.nodelay(False)
-            except curses.error:
-                pass
-            # fallback: ask via curses key name
-            try:
-                stdscr_.move(h_-1, 0); stdscr_.clrtoeol()
-                stdscr_.addnstr(h_-1, 0, "evdev unavailable — type key name: ", w_-1)
-                stdscr_.noutrefresh(); curses.doupdate()
-            except curses.error:
-                pass
-            return None
+            pass
+        try:
+            stdscr_.nodelay(False)
+        except curses.error:
+            pass
+        # evdev unavailable / timed out — caller falls back to a typed name
+        return None
 
     def _choose_action(stdscr_, prompt, current=""):
-        items = [("record", "copy only"), ("record_send", "copy+paste+Enter"), ("paste", "paste clipboard"), ("", "off")]
+        """Action picker: ↑/↓ + Enter; Esc keeps the current value."""
+        items = [("record", "copy only"), ("record_send", "copy+paste+Enter"),
+                 ("paste", "paste clipboard"), ("", "off")]
         sel = 0
-        for i,(v,_) in enumerate(items):
+        for i, (v, _) in enumerate(items):
             if v == current:
-                sel = i; break
+                sel = i
+                break
+        hint = " ↑↓ choose · Enter ok · Esc cancel"
         while True:
             h_, w_ = stdscr_.getmaxyx()
             try:
-                stdscr_.move(h_-1, 0); stdscr_.clrtoeol()
-                line = prompt + "  "
-                for i,(v,lbl) in enumerate(items):
-                    tag = f"[{v or 'off'}:{lbl}]"
-                    if i == sel:
-                        tag = f"[{v or 'off'}]"
-                    line += ("▶" if i==sel else " ") + tag + " "
-                stdscr_.addnstr(h_-1, 0, line[:w-1], w_-1)
-                stdscr_.addnstr(h_-1, max(0,w_-28), " ↑↓ choose · Enter ok · Esc cancel", 28)
-                stdscr_.noutrefresh(); curses.doupdate()
+                stdscr_.move(h_ - 1, 0)
+                stdscr_.clrtoeol()
+                line = prompt + "  " + "  ".join(
+                    f"▶{v or 'off'}" if i == sel else f" {v or 'off'}:{lbl}"
+                    for i, (v, lbl) in enumerate(items))
+                x = max(0, w_ - len(hint))
+                stdscr_.addnstr(h_ - 1, 0, line[:x - 1], w_ - 1)
+                stdscr_.addnstr(h_ - 1, x, hint, len(hint))
+                stdscr_.noutrefresh()
+                curses.doupdate()
             except curses.error:
                 pass
             ch = stdscr_.getch()
             if ch in (curses.KEY_UP, curses.KEY_LEFT):
-                sel = (sel-1) % len(items)
+                sel = (sel - 1) % len(items)
             elif ch in (curses.KEY_DOWN, curses.KEY_RIGHT, 9):  # Tab
-                sel = (sel+1) % len(items)
-            elif ch in (10,13,curses.KEY_ENTER, ord(" ")):
+                sel = (sel + 1) % len(items)
+            elif ch in (10, 13, curses.KEY_ENTER, ord(" ")):
                 return items[sel][0]
             elif ch == 27:
                 return current
 
-    def _edit_keys_flow(stdscr_) -> None:
-        """Keys page: list of bindings; Enter opens a per-bind editor where each
-        option (key / tap / hold / hold-delay / toggle) is its own line."""
-        binds = values.setdefault("_key_binds", [])
-
-        def _edit_bind(stdscr__, bind: dict) -> None:
-            """Per-bind editor — one option per line, each edited separately."""
-            rows = [
-                ("Key",             "key"),
-                ("Tap (short)",     "tap"),
-                ("Hold (long)",     "hold"),
-                ("Hold delay (s)",  "hold_threshold"),
-                ("Toggle",          "toggle"),
-            ]
-            sel = 0
-            while True:
-                h___, w___ = stdscr__.getmaxyx()
-                try:
-                    stdscr__.erase()
-                    title = f" Bind: {_key_label(bind['key'])} "
-                    stdscr__.addnstr(0, 0, title + "─" * max(0, w___ - len(title)),
-                                     w___ - 1, curses.A_REVERSE)
-                    for i, (label, field) in enumerate(rows):
-                        if field == "key":
-                            cur = _key_label(bind["key"])
-                            hint = "press key to re-bind"
-                        elif field == "hold_threshold":
-                            cur = f"{bind.get('hold_threshold', 0.25):g}s"
-                            hint = "seconds 0–5"
-                        else:
-                            cur = bind.get(field, "") or "off"
-                            hint = "record / record_send / paste / off"
-                        line = f" {i+1}. {label:<18} {cur:<14}  [{hint}]"
-                        attrs = curses.A_REVERSE if i == sel else 0
-                        stdscr__.addnstr(2 + i, 1, line[:w___ - 2], w___ - 2, attrs)
-                    note = "tap = short press  ·  hold = long press  ·  toggle = press to start/stop (overrides tap)"
-                    try:
-                        stdscr__.addnstr(2 + len(rows) + 1, 1, note, w___ - 2, curses.A_DIM)
-                    except curses.error:
-                        pass
-                    hint = " ↑/↓ move · Enter edit line · Esc back"
-                    stdscr__.addnstr(h___ - 1, 0, hint, w___ - 1)
-                    stdscr__.noutrefresh()
-                    curses.doupdate()
-                except curses.error:
-                    pass
-                ch = stdscr__.getch()
-                if ch in (27, ord("q"), ord("Q")):
-                    return
-                elif ch == curses.KEY_UP:
-                    sel = (sel - 1) % len(rows)
-                elif ch == curses.KEY_DOWN:
-                    sel = (sel + 1) % len(rows)
-                elif ch in (10, 13, curses.KEY_ENTER, ord(" ")):
-                    field = rows[sel][1]
-                    if field == "key":
-                        rec = _capture_key(stdscr__)
-                        if rec:
-                            if any(x is not bind and x.get("key") == rec for x in binds):
-                                continue
-                            try:
-                                _key_code(rec)
-                                bind["key"] = rec
-                            except SystemExit:
-                                pass
-                        else:
-                            nk = _prompt_line(stdscr__, "key name", bind["key"]).strip().lower() or bind["key"]
-                            if nk != bind["key"] and any(x is not bind and x.get("key") == nk for x in binds):
-                                continue
-                            try:
-                                _key_code(nk)
-                                bind["key"] = nk
-                            except SystemExit:
-                                pass
-                    elif field == "hold_threshold":
-                        raw = _prompt_line(stdscr__, "hold delay seconds (0–5)",
-                                           f"{bind.get('hold_threshold', 0.25):g}").strip()
-                        try:
-                            v = float(raw)
-                            assert 0 < v <= 5
-                            bind["hold_threshold"] = v
-                        except Exception:
-                            pass
-                    else:  # tap / hold / toggle
-                        bind[field] = _choose_action(stdscr__, f"{rows[sel][1]}:",
-                                                     bind.get(field, "") or "")
-
-        def _render_keys_page(sel=0):
-            stdscr_.erase()
-            h__, w__ = stdscr_.getmaxyx()
-            try:
-                stdscr_.addnstr(0, 0, " Keys " + "─" * max(0, w__ - 6), w__ - 1,
-                                curses.A_REVERSE)
-            except curses.error:
-                pass
-            if not binds:
-                try:
-                    stdscr_.addnstr(2, 2, "(no bindings yet — press a to add, then PRESS THE KEY)", w__ - 4)
-                except curses.error:
-                    pass
-                y0 = 4
-            else:
-                y0 = 2
-                for i, b in enumerate(binds):
-                    tap = b.get("tap", "") or "off"
-                    hold = b.get("hold", "") or "off"
-                    tog = b.get("toggle", "") or "off"
-                    thr = b.get("hold_threshold", 0.25)
-                    segs = []
-                    if tog:
-                        segs.append(f"toggle={tog}")
-                    if hold:
-                        segs.append(f"hold={hold}@{thr:g}s")
-                    if tap:
-                        segs.append(f"tap={tap}")
-                    if not segs:
-                        segs.append("(all off)")
-                    line = f" {i+1}. {_key_label(b['key']):16}  {' · '.join(segs)}"
-                    attrs = curses.A_REVERSE if i == sel else 0
-                    try:
-                        stdscr_.addnstr(y0 + i, 1, line[:w__ - 2], w__ - 2, attrs)
-                    except curses.error:
-                        pass
-                try:
-                    stdscr_.addnstr(y0 + len(binds) + 1, 2,
-                                    "toggle overrides tap; hold+tap / hold+toggle are idempotent — safe to combine",
-                                    w__ - 4, curses.A_DIM)
-                except curses.error:
-                    pass
-            hint = " a add (press key) · Enter edit · d delete · Esc/q back"
-            try:
-                stdscr_.addnstr(h__ - 1, 0, hint, w__ - 1)
-            except curses.error:
-                pass
-            stdscr_.noutrefresh()
-            curses.doupdate()
-
+    def _edit_bind_page(stdscr, bind, binds) -> None:
+        """Per-bind editor: one option per line. Key = press-to-capture,
+        tap/hold/toggle = action pickers, hold_delay = seconds prompt."""
+        rows = [
+            ("Key", "key", "press key to re-bind"),
+            ("Tap (short)", "tap", "record / record_send / paste / off"),
+            ("Hold (long)", "hold", "record / record_send / paste / off"),
+            ("Hold delay (s)", "hold_threshold", "seconds 0–5"),
+            ("Toggle (start/stop)", "toggle",
+             "record / record_send / paste / off (overrides tap)"),
+        ]
         sel = 0
-        _render_keys_page(sel)
         while True:
-            ch = stdscr_.getch()
+            h_, w_ = stdscr.getmaxyx()
+            try:
+                stdscr.erase()
+                title = f" Bind: {_key_label(bind['key'])} ({bind['key']}) "
+                stdscr.addnstr(0, 0, title + "─" * max(0, w_ - len(title)),
+                               w_ - 1, curses.A_REVERSE)
+                for i, (label, field, field_hint) in enumerate(rows):
+                    if field == "key":
+                        cur = _key_label(bind["key"])
+                    elif field == "hold_threshold":
+                        cur = f"{bind.get('hold_threshold', 0.25):g}s"
+                    else:
+                        cur = bind.get(field, "") or "off"
+                    line = f" {i + 1}. {label:<20} {cur:<16} [{field_hint}]"
+                    attrs = curses.A_REVERSE if i == sel else 0
+                    stdscr.addnstr(2 + i, 1, line[:w_ - 2], w_ - 2, attrs)
+                note = ("tap = short press · hold = long press · toggle = "
+                        "press to start/stop (overrides tap)")
+                stdscr.addnstr(2 + len(rows) + 1, 1, note[:w_ - 2], w_ - 2, curses.A_DIM)
+                stdscr.addnstr(h_ - 1, 0, " ↑/↓ move · Enter edit line · q/Esc back", w_ - 1)
+                stdscr.noutrefresh()
+                curses.doupdate()
+            except curses.error:
+                pass
+            ch = stdscr.getch()
             if ch in (27, ord("q"), ord("Q")):
                 return
             elif ch == curses.KEY_UP:
-                if binds:
-                    sel = (sel - 1) % len(binds)
-                    _render_keys_page(sel)
+                sel = (sel - 1) % len(rows)
             elif ch == curses.KEY_DOWN:
-                if binds:
-                    sel = (sel + 1) % len(binds)
-                    _render_keys_page(sel)
-            elif ch in (ord("a"), ord("A")):
-                if len(binds) >= 3:
-                    continue
-                name = _capture_key(stdscr_)
-                if not name:
-                    name = _prompt_line(stdscr_, "key name (e.g. rightalt)", "").strip().lower()
-                    if not name:
-                        _render_keys_page(sel)
+                sel = (sel + 1) % len(rows)
+            elif ch in (10, 13, curses.KEY_ENTER, ord(" ")):
+                field = rows[sel][1]
+                if field == "key":
+                    rec = _capture_key(stdscr)
+                    if rec is None:
+                        rec = (_prompt_line(stdscr, "key name", bind["key"])
+                               .strip().lower() or bind["key"])
+                    if rec == bind["key"]:
                         continue
+                    if any(x is not bind and x.get("key") == rec for x in binds):
+                        continue  # duplicate — keep the old key
+                    try:
+                        _key_code(rec)
+                    except SystemExit:
+                        continue  # unknown key name — keep the old key
+                    bind["key"] = rec
+                elif field == "hold_threshold":
+                    raw = _prompt_line(stdscr, "hold delay seconds (0–5)",
+                                       f"{bind.get('hold_threshold', 0.25):g}").strip()
+                    try:
+                        v = float(raw)
+                    except ValueError:
+                        continue  # bad input — keep the old threshold
+                    if 0 < v <= 5:
+                        bind["hold_threshold"] = v
+                else:  # tap / hold / toggle
+                    bind[field] = _choose_action(stdscr, f"{label}:",
+                                                 bind.get(field, "") or "")
+
+    def _add_bind_flow(stdscr) -> str:
+        """Capture a key, append the bind, drop into its editor."""
+        binds = values.setdefault("_key_binds", [])
+        if len(binds) >= 3:
+            return "max 3 binds — remove one first (d)"
+        name = _capture_key(stdscr)
+        if not name:
+            name = _prompt_line(stdscr, "key name (e.g. rightalt)", "").strip().lower()
+        if not name:
+            return "no key — bind not added"
+        try:
+            _key_code(name)
+        except SystemExit as e:
+            return str(e)
+        if any(b.get("key") == name for b in binds):
+            return f"duplicate key {name!r} — each key once"
+        bind = {"key": name, "tap": "", "hold": "", "toggle": "",
+                "hold_threshold": 0.25}
+        binds.append(bind)
+        _edit_bind_page(stdscr, bind, binds)
+        return f"added {name}: {_bind_summary(bind)}"
+
+    def _edit_field_page(stdscr, field) -> str:
+        """Field editor: prompt shows name, description, current, format."""
+        key, label, conv, _section, desc, fmt = field
+        h, w = stdscr.getmaxyx()
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        message = ""
+        if conv is bool:
+            prompt = (f" {label} — {desc}   now: {_fmt_value(values[key])}   "
+                      f"[{fmt}]   space/y = yes · n = no · Esc = keep")
+            try:
+                stdscr.move(h - 1, 0)
+                stdscr.clrtoeol()
+                stdscr.addnstr(h - 1, 0, prompt, w - 1)
+                stdscr.noutrefresh()
+                curses.doupdate()
+            except curses.error:
+                pass
+            while True:
+                ch = stdscr.getch()
+                if ch == 27:
+                    break
+                if ch == ord(" "):
+                    values[key] = not values[key]
+                    break
+                if ch in (ord("y"), ord("Y")):
+                    values[key] = True
+                    break
+                if ch in (ord("n"), ord("N")):
+                    values[key] = False
+                    break
+            message = f"{key} = {_fmt_value(values[key])}"
+        else:
+            buf = _fmt_value(values[key])
+            while True:
+                prompt = f" {label} — {desc}   [{fmt}]   [{buf}]"
                 try:
-                    _key_code(name)
-                except SystemExit:
-                    _render_keys_page(sel)
-                    continue
-                if any(b.get("key") == name for b in binds):
-                    _render_keys_page(sel)
-                    continue
-                bind = {"key": name, "tap": "", "hold": "", "toggle": "",
-                        "hold_threshold": 0.25}
-                binds.append(bind)
-                sel = len(binds) - 1
-                _edit_bind(stdscr_, bind)  # straight into the per-option editor
-                _render_keys_page(sel)
-            elif ch in (10, 13, curses.KEY_ENTER, ord(" "), ord("e"), ord("E")) and binds:
-                _edit_bind(stdscr_, binds[sel])
-                _render_keys_page(sel)
-            elif ch in (ord("d"), ord("x"), curses.KEY_DC, 127) and binds:
-                binds.pop(sel)
-                if sel >= len(binds) and sel > 0:
-                    sel -= 1
-                _render_keys_page(sel)
+                    stdscr.move(h - 1, 0)
+                    stdscr.clrtoeol()
+                    stdscr.addnstr(h - 1, 0, prompt, w - 1)
+                    stdscr.noutrefresh()
+                    curses.doupdate()
+                except curses.error:
+                    pass
+                ch = stdscr.getch()
+                if ch == 27:
+                    message = f"{key} unchanged"
+                    break
+                if ch in (10, 13, curses.KEY_ENTER):
+                    try:
+                        values[key] = _parse_value(buf, conv)
+                        message = f"{key} = {_fmt_value(values[key])}"
+                    except ValueError:
+                        message = f"invalid {conv.__name__} — not saved"
+                    break
+                if ch in (8, 127, curses.KEY_BACKSPACE):
+                    buf = buf[:-1]
+                elif 32 <= ch < 127:
+                    buf += chr(ch)
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        return message
 
     def _show_binds(stdscr) -> None:
+        """Compositor no-op bind snippets ([c] inside section 1)."""
         stdscr.erase()
         h, w = stdscr.getmaxyx()
         for y, ln in enumerate(_COMPOSITOR_SNIPPETS.splitlines()):
@@ -707,72 +738,7 @@ def _tui_main() -> int:
             if ch in (ord("q"), ord("Q"), 27):
                 break
 
-    def _edit_field(stdscr, sel: int, message: str) -> str:
-        field = rows[sel][1]
-        key, label, conv, _section = _SETUP_FIELDS[field]
-        h, w = stdscr.getmaxyx()
-        try:
-            curses.curs_set(1)
-        except curses.error:
-            pass
-        if conv is bool:
-            prompt = f" {label} [{_fmt_value(values[key])}]   space/y = yes · n = no · Esc = keep"
-            try:
-                stdscr.move(h - 1, 0)
-                stdscr.clrtoeol()  # clear the navigation hint line first
-                stdscr.addnstr(h - 1, 0, prompt, w - 1)
-                stdscr.noutrefresh()
-                curses.doupdate()
-            except curses.error:
-                pass
-            while True:
-                ch = stdscr.getch()
-                if ch in (27,):
-                    break
-                if ch == ord(" "):
-                    values[key] = not values[key]
-                    break
-                if ch in (ord("y"), ord("Y")):
-                    values[key] = True
-                    break
-                if ch in (ord("n"), ord("N")):
-                    values[key] = False
-                    break
-            message = f"{key} = {_fmt_value(values[key])}"
-        else:
-            buf = _fmt_value(values[key])
-            while True:
-                prompt = f" {label} [{buf}]"
-                try:
-                    stdscr.move(h - 1, 0)
-                    stdscr.clrtoeol()  # clear the navigation hint line first
-                    stdscr.addnstr(h - 1, 0, prompt, w - 1)
-                    stdscr.noutrefresh()
-                    curses.doupdate()
-                except curses.error:
-                    pass
-                ch = stdscr.getch()
-                if ch in (27,):
-                    break
-                if ch in (10, 13, curses.KEY_ENTER):
-                    try:
-                        values[key] = _parse_value(buf, conv)
-                        message = f"{key} = {_fmt_value(values[key])}"
-                    except ValueError:
-                        message = "invalid value, not saved"
-                    break
-                if ch in (8, 127, curses.KEY_BACKSPACE):
-                    buf = buf[:-1]
-                elif 32 <= ch < 127:
-                    buf += chr(ch)
-        try:
-            curses.curs_set(0)
-        except curses.error:
-            pass
-        return message
-
     def run(stdscr) -> int:
-        nonlocal rows, show_advanced
         try:
             curses.curs_set(0)
         except curses.error:
@@ -782,90 +748,176 @@ def _tui_main() -> int:
             curses.use_default_colors()
         except curses.error:
             pass
-        sel, scroll = 0, 0
-        while sel < len(rows) and rows[sel][0] not in ("field", "keys"):
-            sel += 1
-        message = "↑/↓ move · Enter/k edit keys · a advanced · s save · t test · p compositor · r restart · q quit"
+
+        page = "home"      # "home" | "section"
+        section = None     # section name while page == "section"
+        sel = 0
+        message = ""
+        # short startup probe so the first frame is never delayed long;
+        # [t] re-tests with the full 3s timeout
+        stt_status = _health_check(values["whisper_health_url"], timeout=1)
+
+        def _home_rows():
+            rows = []
+            for n, name in enumerate(TOP_SECTIONS, start=1):
+                if name == KEYS_SECTION:
+                    detail = _binds_line(values)
+                else:
+                    detail = f"{len(_section_fields(name))} settings"
+                rows.append(("section", name, f"{n}) {name}", detail))
+            n_adv = len(_section_fields(SECTION_ADVANCED))
+            rows.append(("section", SECTION_ADVANCED, "a) Advanced",
+                         f"collapsed — {n_adv} settings"))
+            return rows
+
+        def _section_rows(name):
+            rows = []
+            if name == KEYS_SECTION:
+                for i, b in enumerate(values.get("_key_binds") or []):
+                    rows.append(("bind", i, _key_label(b["key"]), _bind_summary(b)))
+            for idx, f in _section_fields(name):
+                key, label, _conv, _sec, _desc, _fmt = f
+                mark = "*" if key in _CFG else " "
+                rows.append(("field", idx, f"{mark} {label}", _fmt_value(values[key])))
+            return rows
+
+        def _detail(rows_) -> str:
+            if not rows_ or sel >= len(rows_):
+                return ""
+            kind, payload, left, _right = rows_[sel]
+            if kind == "section":
+                return f"{left} — Enter to open"
+            if kind == "bind":
+                return (f"{left} — Enter edit · n add · d delete · "
+                        "c compositor hints · toggle overrides tap")
+            _key, label, _conv, _sec, desc, fmt = _SETUP_FIELDS[payload]
+            return f"{label} — {desc}   [{fmt}]"
+
         while True:
+            rows = _home_rows() if page == "home" else _section_rows(section)
+            sel = max(0, min(sel, len(rows) - 1)) if rows else 0
+
             stdscr.erase()
             h, w = stdscr.getmaxyx()
-            positions = []
-            y = 1
-            for kind, payload in rows:
-                positions.append((kind, payload, y))
-                y += 1
-            sel_y = positions[sel][2]
-            if sel_y - scroll < 1:
-                scroll = sel_y - 1
-            elif sel_y - scroll > h - 3:
-                scroll = sel_y - (h - 3)
-            title = f" shipboard setup — {DEFAULT_CONFIG_PATH}  ({'on' if _daemon_running() else 'off'}) "
             try:
+                _home = os.path.expanduser("~")
+                _path_disp = str(DEFAULT_CONFIG_PATH).replace(_home, "~", 1)
+                title = (f" shipboard setup — {_path_disp}   "
+                         f"daemon: {'on' if _daemon_running() else 'off'} ")
                 stdscr.addnstr(0, 0, title, w - 1, curses.A_REVERSE)
             except curses.error:
                 pass
-            for kind, payload, py in positions:
-                yy = py - scroll
-                if yy < 1 or yy >= h - 1:
-                    continue
+
+            if page == "home":
                 try:
-                    if kind == "section":
-                        stdscr.addnstr(yy, 0, f"  == {payload} ==", w - 1,
-                                       curses.A_BOLD)
-                    elif kind == "keys":
-                        selected = rows[sel][0] == "keys"
-                        attrs = curses.A_REVERSE if selected else curses.A_BOLD
-                        stdscr.addnstr(yy, 0, f"  {_keys_summary()}", w - 1, attrs)
-                    else:
-                        key, label, conv, _section = _SETUP_FIELDS[payload]
-                        mark = "*" if key in _CFG else " "
-                        selected = kind == "field" and payload == rows[sel][1]
-                        attrs = curses.A_REVERSE if selected else 0
-                        stdscr.addnstr(yy, 0,
-                                       f" {mark} {label:<46} {_fmt_value(values[key])}",
-                                       w - 1, attrs)
+                    stdscr.addnstr(1, 0, f" stt: {stt_status}", w - 1, curses.A_DIM)
                 except curses.error:
                     pass
+                y = 3
+                for i, (_kind, _payload, left, right) in enumerate(rows):
+                    attrs = curses.A_REVERSE if i == sel else curses.A_BOLD
+                    try:
+                        stdscr.addnstr(y, 0, f" {left:<20} {right}", w - 1, attrs)
+                    except curses.error:
+                        pass
+                    y += 1
+                hint = (" 1-5/a section · Enter open · s save · t test STT · "
+                        "r restart · q quit")
+            else:
+                if section == KEYS_SECTION:
+                    try:
+                        stdscr.addnstr(1, 0,
+                                       " keys: n add (press key) · Enter edit · "
+                                       "d delete · c compositor hints", w - 1, curses.A_DIM)
+                    except curses.error:
+                        pass
+                y = 3 if section == KEYS_SECTION else 2
+                for i, (_kind, _payload, left, right) in enumerate(rows):
+                    attrs = curses.A_REVERSE if i == sel else 0
+                    try:
+                        stdscr.addnstr(y, 0, f" {left:<24} {right}", w - 1, attrs)
+                    except curses.error:
+                        pass
+                    y += 1
+                hint = (" ↑/↓ move · Enter edit · s save · t test STT · "
+                        "r restart · q/Esc back")
+
             try:
-                stdscr.addnstr(h - 1, 0, message, w - 1)
+                stdscr.addnstr(h - 2, 0, f" {message or _detail(rows)}", w - 1,
+                               curses.A_DIM)
+            except curses.error:
+                pass
+            try:
+                stdscr.addnstr(h - 1, 0, hint, w - 1)
             except curses.error:
                 pass
             stdscr.noutrefresh()
             curses.doupdate()
+
             ch = stdscr.getch()
-            if ch in (curses.KEY_UP,):
-                sel = _next_field(sel, -1)
-            elif ch in (curses.KEY_DOWN,):
-                sel = _next_field(sel, 1)
-            elif ch in (curses.KEY_RESIZE,):
+            if ch == curses.KEY_UP:
+                sel -= 1
+            elif ch == curses.KEY_DOWN:
+                sel += 1
+            elif ch == curses.KEY_RESIZE:
                 continue
-            elif ch in (10, 13, curses.KEY_ENTER):
-                if rows[sel][0] == "keys":
-                    _edit_keys_flow(stdscr)
-                    message = "keys: " + _keys_summary()
-                else:
-                    message = _edit_field(stdscr, sel, message)
-            elif ch == ord("k"):
-                _edit_keys_flow(stdscr)
-                message = "keys: " + _keys_summary()
-            elif ch == ord("a"):
-                show_advanced = not show_advanced
-                rows = _build_rows()
-                sel = 0
-                while sel < len(rows) and rows[sel][0] not in ("field", "keys"):
-                    sel += 1
-                message = "advanced shown" if show_advanced else "advanced hidden"
-            elif ch == ord("s"):
-                _save_config_file(values)
-                message = "saved to ~/.config/shipboard/shipboard.toml - restart daemon to apply (r)"
-            elif ch == ord("t"):
-                message = "STT health: " + _health_check(values["whisper_health_url"])
-            elif ch == ord("p"):
-                _show_binds(stdscr)
-            elif ch == ord("r"):
-                message = _restart_daemon()
-            elif ch in (ord("q"), ord("Q")):
-                return 0
+            elif page == "home":
+                if ch in (10, 13, curses.KEY_ENTER) and rows:
+                    section = rows[sel][1]
+                    page = "section"
+                    sel = 0
+                    message = ""
+                elif ord("1") <= ch <= ord("0") + len(TOP_SECTIONS):
+                    section = TOP_SECTIONS[ch - ord("1")]
+                    page = "section"
+                    sel = 0
+                    message = ""
+                elif ch in (ord("a"), ord("A")):
+                    section = SECTION_ADVANCED
+                    page = "section"
+                    sel = 0
+                    message = ""
+                elif ch == ord("s"):
+                    _save_config_file(values)
+                    message = "saved — restart the daemon to apply (r)"
+                elif ch == ord("t"):
+                    stt_status = _health_check(values["whisper_health_url"])
+                    message = "STT health: " + stt_status
+                elif ch == ord("r"):
+                    message = _restart_msg()
+                elif ch in (ord("q"), ord("Q"), 27):
+                    return 0
+            else:  # section page
+                if ch in (10, 13, curses.KEY_ENTER) and rows:
+                    kind, payload = rows[sel][0], rows[sel][1]
+                    if kind == "bind":
+                        bind = (values.get("_key_binds") or [])[payload]
+                        _edit_bind_page(stdscr, bind,
+                                        values.setdefault("_key_binds", []))
+                        message = "keys: " + _binds_line(values)
+                    else:
+                        message = _edit_field_page(stdscr, _SETUP_FIELDS[payload])
+                elif ch in (ord("n"), ord("N")) and section == KEYS_SECTION:
+                    message = _add_bind_flow(stdscr)
+                elif ch in (ord("d"), ord("x")) and section == KEYS_SECTION and rows \
+                        and rows[sel][0] == "bind":
+                    removed = (values.get("_key_binds") or []).pop(rows[sel][1])
+                    message = f"removed {_key_label(removed['key'])}"
+                elif ch in (ord("c"), ord("C")) and section == KEYS_SECTION:
+                    _show_binds(stdscr)
+                elif ch == ord("s"):
+                    _save_config_file(values)
+                    message = "saved — restart the daemon to apply (r)"
+                elif ch == ord("t"):
+                    stt_status = _health_check(values["whisper_health_url"])
+                    message = "STT health: " + stt_status
+                elif ch == ord("r"):
+                    message = _restart_msg()
+                elif ch in (ord("q"), ord("Q"), 27):
+                    page = "home"
+                    section = None
+                    sel = 0
+                    message = ""
         return 0
 
     try:
