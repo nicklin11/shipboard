@@ -308,6 +308,12 @@ WAKEWORD_SHERPA_THRESHOLD = _cfg("wakeword_sherpa_threshold",
                                  "SHIPBOARD_WAKEWORD_SHERPA_THRESHOLD",
                                  0.25, float)
 KWS_THREADS = _cfg("kws_threads", "SHIPBOARD_KWS_THREADS", 2, int)
+# Tap-started recording auto-stops after this much silence (single-press
+# flow: tap -> speak -> quiet -> processed). 0 disables. Default follows
+# wakeword_stop_silence so mid-speech pauses behave the same everywhere.
+TAP_STOP_SILENCE = float(_cfg("tap_stop_silence", "SHIPBOARD_TAP_STOP_SILENCE",
+                              WAKEWORD_STOP_SILENCE, float))
+TAP_START_GRACE = 1.0  # seconds after the tap before silence may count
 # Per-action wake words (edited with `shipboard setup`) compose the KWS
 # phrase list; the raw wakeword_keywords key stays for hand-edited configs.
 _WAKE_WORD_ACTIONS = (
@@ -1151,7 +1157,66 @@ class _Daemon:
             self._start_record(key=key, mode=mode)
             if self.recording:
                 self.autosend = autosend
+                # tap has no "release to stop" (release already fired the
+                # start), so a single press needs its own stop signal:
+                # auto-finish after silence instead of hanging till max_hold.
+                if mode == "tap" and TAP_STOP_SILENCE > 0:
+                    threading.Thread(target=self._tap_silence_watch,
+                                     name="tap-silence", daemon=True).start()
             return
+
+    def _tap_silence_watch(self) -> None:
+        """Auto-stop a tap-started recording once speech goes quiet.
+
+        Mirrors the wake listener's silence logic (RMS threshold, grace)
+        but with its own pw-cat meter, independent of the wake word engine.
+        """
+        try:
+            for sp in (_WAKE_VENV / "lib").glob("python*/site-packages"):
+                sys.path.insert(0, str(sp))
+            import numpy as np
+        except Exception as exc:
+            _log(f"tap silence: numpy unavailable ({exc}) — auto-stop off")
+            return
+        cmd = ["pw-cat", "--record", "--rate", str(RATE), "--channels",
+               str(CHANNELS), "--format", "s16", "--raw", "-"]
+        if RECORD_TARGET:
+            cmd += ["--target", RECORD_TARGET]
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            _log(f"tap silence: pw-cat failed ({exc}) — auto-stop off")
+            return
+        t0 = time.monotonic()
+        silence_since: float | None = None
+        spoke = False
+        try:
+            while self.recording and self._rec_mode == "tap":
+                raw = proc.stdout.read(int(RATE * CHANNELS * 2 * 0.08))
+                if not raw:
+                    break
+                audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                now = time.monotonic()
+                rms = float(np.sqrt(np.mean(audio ** 2)))
+                if rms >= _WAKE_SILENCE_RMS:
+                    spoke = True
+                    silence_since = None
+                    continue
+                if not spoke and now - t0 < TAP_START_GRACE:
+                    continue  # give the user a beat to start talking
+                if silence_since is None:
+                    silence_since = now
+                elif now - silence_since >= TAP_STOP_SILENCE:
+                    if self.recording and self._rec_mode == "tap":
+                        _log(f"tap silence: {TAP_STOP_SILENCE:.1f}s quiet — finishing")
+                        self._finish_record()
+                    break
+        finally:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
 
     def _on_key_press(self, code: int) -> None:
         bind = self._binding_for(code)
@@ -1449,6 +1514,7 @@ _SETUP_FIELDS = [
     ("wakeword_enabled",   "Wake word listener (engine WIP)",    bool, "Advanced"),
     ("wakeword_cooldown",  "Wake word cooldown, seconds",        float, "Advanced"),
     ("wakeword_grace",     "Wake word grace, seconds",           float, "Advanced"),
+    ("tap_stop_silence",   "Tap record auto-stop silence, s (0=off)", float, "Advanced"),
     ("wakeword_stop_silence", "Wake word stop on silence, s",    float, "Advanced"),
     ("wakeword_action",    "Wake word action (record/record_send)", str, "Advanced"),
     ("wakeword_silence_level", "Wake word silence RMS level",    float, "Advanced"),
@@ -1489,6 +1555,7 @@ def _field_defaults() -> dict:
         "wakeword_cooldown": 2.0,
         "wakeword_grace": 3.0,
         "wakeword_stop_silence": 1.5,
+        "tap_stop_silence": 1.5,
         "wakeword_action": "record",
         "wakeword_silence_level": 500.0,
         "wakeword_sherpa_score": 1.0,
