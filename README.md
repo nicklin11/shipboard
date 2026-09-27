@@ -125,10 +125,14 @@ Actions: `record` → transcribe → clipboard; `record_send` → transcribe →
 clipboard → paste (+Enter per the flags below); `paste` → paste current
 clipboard (+Enter per `scroll_send_enter`).
 
-**Tap = one-press dictation.** A tap starts recording with no release to
-stop it, so the recording auto-finishes after `tap_stop_silence` seconds of
-quiet (default: same as `wakeword_stop_silence`; `0` disables). Set it to 0
-only if you want the old latch behaviour (tap again to stop).
+**Tap = one-press dictation.** A tap — and likewise a quick press on a bind
+with `toggle` set (toggle overrides `tap`, so that press *is* the toggle) —
+starts recording with no release to stop it, so the recording auto-finishes
+after `tap_stop_silence` seconds of quiet (default: same as
+`wakeword_stop_silence`; `0` disables). Set it to 0 only if you want the
+latch behaviour (press again to stop). The finish notification names its
+trigger and duration — e.g. `Processing speech... (toggle Rightalt, 12s)` —
+and says when a recording ran into `max_hold`.
 
 Rules: 1–3 bindings, one action set per key, no overlapping keys.
 

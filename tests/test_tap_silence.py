@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Regression: tap-started recording auto-stops on silence.
+"""Regression: tap/toggle-started recordings auto-stop on silence.
 
 Runs the real shipboard daemon module with a stubbed pw-cat stream; verifies
-one-press flow (tap -> speak -> quiet -> processed) and that hold/toggle
-recordings are not touched by the tap watcher.
+one-press flow (press -> speak -> quiet -> processed) for BOTH tap and
+toggle modes (toggle overrides tap, so a quick press starts a toggle with no
+release-to-stop — issue #1), that hold recordings are not touched by the
+watcher, and that a watcher left over from a previous cycle (stale gen) can
+never stop the next recording.
 """
 import sys
 import time
@@ -49,7 +52,7 @@ class FakePopen:
         self.terminated = True
 
 
-def make_daemon(mode):
+def make_daemon(mode, gen=0):
     d = object.__new__(sbd._Daemon)
     d.recording = True
     d.rec_proc = None
@@ -57,17 +60,21 @@ def make_daemon(mode):
     d.autosend = False
     d._rec_key = "rightalt"
     d._rec_mode = mode
+    d._rec_gen = gen
     d.finished = []
     d._finish_record = lambda from_wake=False: (
         d.finished.append(time.monotonic()), setattr(d, "recording", False))
     return d
 
 
-def run_watcher(chunks, mode="tap"):
+def run_watcher(chunks, mode="tap", gen=None):
     d = make_daemon(mode)
     t0 = time.monotonic()
     sbd.subprocess.Popen = lambda cmd, **kw: FakePopen(chunks)
-    d._tap_silence_watch()
+    if gen is None:
+        d._tap_silence_watch()
+    else:
+        d._tap_silence_watch(gen)
     return d, time.monotonic() - t0
 
 
@@ -97,12 +104,27 @@ elif dt < 0.15:
 d, dt = run_watcher(["s"] * 30, mode="hold")
 if d.finished:
     fails.append("hold-mode: watcher finished a hold recording")
-if not getattr(d, "_silence_proc_terminated", True):
-    pass  # FakePopen.terminated checked below via last proc is out of scope
+
+# 5. toggle-mode recording (quick press, toggle overrides tap) -> same
+#    speech-then-silence auto-stop as tap; without it the recording hangs
+#    until max_hold and resurfaces as an unexplained notification (issue #1)
+d, dt = run_watcher(["v"] * 12 + ["s"] * 10, mode="toggle")
+if not d.finished:
+    fails.append("toggle speech-then-silence: no finish")
+elif dt > 2.0:
+    fails.append(f"toggle speech-then-silence: took {dt:.2f}s (too slow)")
+
+# 6. stale watcher (older recording generation) -> must exit untouched even
+#    though the CURRENT recording is mid-speech
+d = make_daemon("toggle", gen=0)
+sbd.subprocess.Popen = lambda cmd, **kw: FakePopen(["v"] * 5 + ["s"] * 30)
+d._tap_silence_watch(d._rec_gen + 1)
+if d.finished:
+    fails.append("stale-gen: watcher finished a newer recording")
 
 if fails:
     print("FAIL:")
     for f in fails:
         print(" -", f)
     sys.exit(1)
-print("OK: tap silence auto-stop (4 scenarios)")
+print("OK: silence auto-stop for tap/toggle + stale-gen guard (6 scenarios)")

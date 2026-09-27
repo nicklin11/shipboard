@@ -185,6 +185,11 @@ class _Daemon:
         self.pause_down = False
         self.wake_rec = False
         self._inject_q: "queue.Queue[bool]" = queue.Queue()
+        # _finish_record is reachable from the key path, the silence watcher
+        # and the max-hold check — the claim lock makes sure only one of
+        # them stops/transcribes a cycle (otherwise: double notifications).
+        self._rec_claim = threading.Lock()
+        self._rec_gen = 0  # bumped per started recording; pins a watcher
         # key->behaviour state
         self._key_down: dict[int, float] = {}  # code -> down_time
         self._hold_fired: set[int] = set()  # codes where hold threshold already fired
@@ -219,6 +224,7 @@ class _Daemon:
         wav = tmp_dir / "rec.wav"
         self.rec_proc = start_recording(wav)
         self.recording = True
+        self._rec_gen += 1
         self.rec_t0 = time.monotonic()
         self._tmp_dir = tmp_dir
         self._rec_key = key
@@ -230,21 +236,34 @@ class _Daemon:
         _notify("shipboard", f"Recording... ({mode_word} {label})")
 
     def _finish_record(self, from_wake: bool = False) -> None:
-        if not self.recording or self.rec_proc is None:
+        # Claim the cycle atomically: the key path, the silence watcher and
+        # the max-hold check all call this; the first caller wins, the rest
+        # return without re-stopping or double-transcribing.
+        with self._rec_claim:
+            if not self.recording or self.rec_proc is None:
+                return
+            self.recording = False
+            proc = self.rec_proc
+            cycle_lock = getattr(self, "_cycle_lock", None)
+            self._cycle_lock = None
+            duration = time.monotonic() - self.rec_t0
+            autosend = self.autosend
+            self.autosend = False
+            was_key = self._rec_key
+            was_mode = self._rec_mode
+            self._rec_key = None
+            self._rec_mode = None
+            tmp_dir = getattr(self, "_tmp_dir", None)
+        stop_recording(proc)
+        _log(f"finish: autosend={autosend} from_wake={from_wake} dur={duration:.1f} key={was_key} mode={was_mode}")
+        if tmp_dir is None:
+            if cycle_lock is not None:
+                try:
+                    cycle_lock.close()
+                except OSError:
+                    pass
             return
-        stop_recording(self.rec_proc)
-        self.recording = False
-        duration = time.monotonic() - self.rec_t0
-        autosend = self.autosend
-        self.autosend = False
-        _log(f"finish: autosend={autosend} from_wake={from_wake} dur={duration:.1f} key={self._rec_key} mode={self._rec_mode}")
-        was_key = self._rec_key
-        was_mode = self._rec_mode
-        self._rec_key = None
-        self._rec_mode = None
-        cycle_lock = getattr(self, "_cycle_lock", None)
-        self._cycle_lock = None
-        wav = Path(self._tmp_dir) / "rec.wav"
+        wav = Path(tmp_dir) / "rec.wav"
         try:
             if duration < MIN_RECORDING:
                 _notify("shipboard", "Recording too short")
@@ -255,7 +274,20 @@ class _Daemon:
             if KEEP_AUDIO_DIR is not None:
                 KEEP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
                 shutil.copy(wav, KEEP_AUDIO_DIR / f"rec-{int(time.time())}.wav")
-            _notify("shipboard", "Processing speech...")
+            # Provenance: say WHAT started this recording and HOW LONG it ran,
+            # so a late finish (e.g. a forgotten toggle hitting max_hold)
+            # never shows up as an unexplained "Processing speech...".
+            if from_wake:
+                trig = "wake word"
+            else:
+                trig = was_mode or "key"
+                if was_key:
+                    trig += f" {_key_label(was_key)}"
+            if duration >= MAX_HOLD:
+                trig += f", hit max_hold {MAX_HOLD:g}s"
+            else:
+                trig += f", {duration:.0f}s"
+            _notify("shipboard", f"Processing speech... ({trig})")
             _write_state(state="processing")
             try:
                 text, preview = _transcribe_copy(wav)
@@ -285,7 +317,7 @@ class _Daemon:
                 _notify("shipboard", f"Copied: {preview}")
         finally:
             try:
-                shutil.rmtree(self._tmp_dir, ignore_errors=True)
+                shutil.rmtree(tmp_dir, ignore_errors=True)
             except AttributeError:
                 pass
             if cycle_lock is not None:
@@ -317,20 +349,27 @@ class _Daemon:
             self._start_record(key=key, mode=mode)
             if self.recording:
                 self.autosend = autosend
-                # tap has no "release to stop" (release already fired the
-                # start), so a single press needs its own stop signal:
-                # auto-finish after silence instead of hanging till max_hold.
-                if mode == "tap" and TAP_STOP_SILENCE > 0:
+                # tap AND toggle have no "release to stop" (tap: the release
+                # already fired the start; toggle: same gesture when toggle
+                # overrides tap), so a single press needs its own stop signal:
+                # auto-finish after silence instead of hanging till max_hold
+                # and surfacing minutes later as an unexplained notification.
+                if mode in ("tap", "toggle") and TAP_STOP_SILENCE > 0:
                     threading.Thread(target=self._tap_silence_watch,
+                                     args=(self._rec_gen,),
                                      name="tap-silence", daemon=True).start()
             return
 
-    def _tap_silence_watch(self) -> None:
-        """Auto-stop a tap-started recording once speech goes quiet.
+    def _tap_silence_watch(self, gen: int | None = None) -> None:
+        """Auto-stop a tap/toggle-started recording once speech goes quiet.
 
         Mirrors the wake listener's silence logic (RMS threshold, grace)
         but with its own pw-cat meter, independent of the wake word engine.
+        `gen` pins the watcher to ONE recording: a watcher left over from a
+        previous cycle must never stop the next one.
         """
+        if gen is None:
+            gen = self._rec_gen
         try:
             for sp in (_WAKE_VENV / "lib").glob("python*/site-packages"):
                 sys.path.insert(0, str(sp))
@@ -352,7 +391,8 @@ class _Daemon:
         silence_since: float | None = None
         spoke = False
         try:
-            while self.recording and self._rec_mode == "tap":
+            while (self.recording and gen == self._rec_gen
+                   and self._rec_mode in ("tap", "toggle")):
                 raw = proc.stdout.read(int(RATE * CHANNELS * 2 * 0.08))
                 if not raw:
                     break
@@ -368,8 +408,9 @@ class _Daemon:
                 if silence_since is None:
                     silence_since = now
                 elif now - silence_since >= TAP_STOP_SILENCE:
-                    if self.recording and self._rec_mode == "tap":
-                        _log(f"tap silence: {TAP_STOP_SILENCE:.1f}s quiet — finishing")
+                    if (self.recording and gen == self._rec_gen
+                            and self._rec_mode in ("tap", "toggle")):
+                        _log(f"silence stop: {TAP_STOP_SILENCE:.1f}s quiet — finishing")
                         self._finish_record()
                     break
         finally:

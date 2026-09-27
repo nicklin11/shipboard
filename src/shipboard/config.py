@@ -236,8 +236,12 @@ WAKEWORD_SHERPA_THRESHOLD = _cfg("wakeword_sherpa_threshold",
                                  "SHIPBOARD_WAKEWORD_SHERPA_THRESHOLD",
                                  0.25, float)
 KWS_THREADS = _cfg("kws_threads", "SHIPBOARD_KWS_THREADS", 2, int)
-# Tap-started recording auto-stops after this much silence (single-press
-# flow: tap -> speak -> quiet -> processed). 0 disables. Default follows
+# Tap/toggle-started recording auto-stops after this much silence
+# (single-press flow: press -> speak -> quiet -> processed). Toggle starts
+# need it too: toggle overrides tap, and that quick press has no
+# release-to-stop either — without this it hangs until max_hold and then
+# resurfaces minutes later as an unexplained "Processing speech...".
+# 0 disables (latch: press again to stop). Default follows
 # wakeword_stop_silence so mid-speech pauses behave the same everywhere.
 TAP_STOP_SILENCE = float(_cfg("tap_stop_silence", "SHIPBOARD_TAP_STOP_SILENCE",
                               WAKEWORD_STOP_SILENCE, float))
@@ -312,7 +316,7 @@ _SETUP_SECTIONS = [
         ("min_recording", "Min recording",
          "Shorter recordings are discarded as noise", float, "seconds"),
         ("tap_stop_silence", "Tap stop silence",
-         "Tap-started recording auto-stops after this much silence",
+         "Tap/toggle-started recording auto-stops after this much silence",
          float, "seconds, 0 disables"),
     )),
     (SECTION_STT, (
