@@ -174,10 +174,23 @@ sherpa-onnx + numpy); models go to `~/.local/share/shipboard/models/`.
 | `shipboard setup` | numbered CLI dialog (sections: STT, Recording, Send, Keys, Wake words, Platform) |
 | `shipboard tui` (alias `setup-tui`) | full-screen curses setup: `↑/↓` navigate · `Enter` edit · `s` save · `t` test STT · `p` compositor bind snippets · `r` restart daemon · `q` quit |
 | `shipboard config` | interactive TOML editor |
+| `shipboard process PATH` | transcribe an already-recorded file to stdout (`--copy` to clipboard) |
 | `shipboard --seconds N` | one-shot: record N seconds, transcribe |
 | `shipboard --file PATH` | one-shot: transcribe an audio file |
 | `shipboard --send` | one-shot: paste clipboard + Enter |
 | `shipboard --no-copy` | with `--file`/`--seconds`: print instead of copying |
+
+`process` is the one to reach for on anything already on disk — it writes to
+stdout so it pipes into a file or another tool, never silently succeeds (a
+failed transcription is a non-zero exit plus a message on stderr), and scales
+its HTTP timeout to the audio length, so lectures are not cut off at the old
+fixed 120 s. It also refreshes the whisper idle marker during the request, so
+`whisper-idle-stop.timer` cannot SIGTERM the container mid-transcription.
+
+```sh
+shipboard process lecture.wav > lecture.md   # straight into a note
+shipboard process lecture.wav --copy         # clipboard instead
+```
 
 State lives in `~/.local/state/shipboard/state.json`; personal config in
 `~/.config/shipboard/shipboard.toml` (created/edited by `setup`; never

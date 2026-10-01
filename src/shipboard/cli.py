@@ -141,6 +141,68 @@ def _send_main() -> int:
     return 0
 
 
+def _process_main(argv: list[str]) -> int:
+    """Transcribe an already-recorded audio file (the `process` subcommand).
+
+    Prints the transcript to stdout so it composes with shell redirection;
+    `--copy` keeps the daemon's clipboard behaviour. Unlike `--file`, a
+    failure is always reported: non-zero exit and a message on stderr.
+    """
+    parser = argparse.ArgumentParser(
+        prog="shipboard process",
+        description="Transcribe an already-recorded audio file.",
+    )
+    parser.add_argument("path", type=Path, help="audio file to transcribe")
+    parser.add_argument(
+        "--copy", action="store_true",
+        help="copy the transcript to the clipboard instead of printing it",
+    )
+    args = parser.parse_args(argv)
+
+    wav = args.path.expanduser().resolve()
+    if not wav.is_file():
+        print(f"shipboard: file not found: {wav}", file=sys.stderr)
+        return 1
+
+    # Same lock as the record path: never transcribe while a recording is in
+    # flight, or the two would race for the clipboard.
+    lock_fh = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_fh.close()
+        print("shipboard: recording in progress — retry when it finishes", file=sys.stderr)
+        return 1
+    try:
+        _notify("shipboard", "Processing speech...")
+        try:
+            text = normalize_text(transcribe(wav))
+        except Exception as exc:
+            _notify("shipboard", f"Recognition error: {exc}")
+            print(f"shipboard: {exc}", file=sys.stderr)
+            return 1
+        if not text:
+            _notify("shipboard", "Nothing recognized")
+            print("shipboard: nothing recognized", file=sys.stderr)
+            return 1
+        if args.copy:
+            try:
+                copy_to_clipboard(text)
+            except Exception as exc:
+                print(f"shipboard: copy failed: {exc}", file=sys.stderr)
+                return 1
+            _notify("shipboard", f"Copied: {text[:100]}")
+        else:
+            print(text)
+        return 0
+    finally:
+        lock_fh.close()
+        try:
+            Path(LOCK_PATH).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def main() -> int:
     if sys.argv[1:2] == ["status"]:
         return _status_main()
@@ -161,12 +223,15 @@ def main() -> int:
         return _stop_daemon()
     if sys.argv[1:2] == ["restart"]:
         return _restart_main()
+    if sys.argv[1:2] == ["process"]:
+        return _process_main(sys.argv[2:])
 
     parser = argparse.ArgumentParser(
         description=(
             "shipboard: voice daemon (Pause/Scroll Lock) + helpers.\n"
             "CLI subcommands: daemon/start (run detached), stop (SIGTERM), "
             "restart (systemd or respawn), status (state), "
+            "process PATH (transcribe a recorded file to stdout), "
             "config (TOML editor), --send (paste+Enter).\n"
             "Interactive: setup (full-screen TUI, default when a terminal; "
             "--cli forces the numbered dialog), tui/setup-tui (curses setup)."

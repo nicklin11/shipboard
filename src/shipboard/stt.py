@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
+import threading
 import time
 import uuid
+import wave
 from pathlib import Path
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -13,6 +16,18 @@ from urllib import request as urllib_request
 from .actions import copy_to_clipboard, normalize_text
 from .config import (HEALTH_URL, IDLE_MARKER, PROMPT, WHISPER_CONTAINER,
                      WHISPER_LANGUAGE, WHISPER_URL)
+
+# A request has to outlive the audio it carries. Measured on this box
+# (large-v3-turbo + silero VAD, 6 threads): ~16x realtime, so an allowance
+# of 0.75x realtime plus a minute leaves ~20x headroom while still capping a
+# wedged server well below the lecture length.
+REALTIME_ALLOWANCE = 0.75
+TIMEOUT_FLOOR = 120.0
+TIMEOUT_HEADROOM = 60.0
+# whisper-idle-stop.timer SIGTERMs the container once the marker is older than
+# WHISPER_IDLE_SECONDS (300). Touching it at most this often keeps a long
+# request alive.
+IDLE_TOUCH_INTERVAL = 60.0
 
 def _multipart_body(fields: dict[str, str], wav_path: Path) -> tuple[bytes, str]:
     boundary = f"----shipboard-{uuid.uuid4().hex}"
@@ -68,6 +83,59 @@ def _ensure_server(timeout: float = 60.0) -> None:
     raise RuntimeError(f"whisper.cpp did not come up at {HEALTH_URL}")
 
 
+def _audio_seconds(path: Path) -> float | None:
+    """Duration of a WAV in seconds, or None when it cannot be read cheaply."""
+    if path.suffix.lower() != ".wav":
+        return None
+    try:
+        with contextlib.closing(wave.open(str(path), "rb")) as wav:
+            rate = wav.getframerate()
+            return wav.getnframes() / rate if rate else None
+    except (wave.Error, OSError, EOFError, ValueError):
+        # wave raises EOFError (not an OSError) on a truncated header and
+        # ValueError on a zero/absent framerate.
+        return None
+
+
+def _request_timeout(path: Path) -> float:
+    """HTTP timeout for transcribing `path`: scale it to the audio length.
+
+    The old fixed 120 s expired on any recording longer than ~30 minutes,
+    which is every lecture — whisper.cpp was still working when urllib gave
+    up.
+    """
+    seconds = _audio_seconds(path)
+    if seconds is None:
+        return TIMEOUT_FLOOR
+    return max(TIMEOUT_FLOOR, seconds * REALTIME_ALLOWANCE + TIMEOUT_HEADROOM)
+
+
+@contextlib.contextmanager
+def _idle_heartbeat(interval: float = IDLE_TOUCH_INTERVAL):
+    """Keep the whisper idle marker fresh for the duration of a request.
+
+    _ensure_server touches the marker once, on entry. A transcription that
+    outlasts WHISPER_IDLE_SECONDS (300) would otherwise be killed mid-flight
+    by whisper-idle-stop.timer, surfacing as a dropped connection.
+    """
+    stop = threading.Event()
+
+    def beat() -> None:
+        while not stop.wait(interval):
+            try:
+                IDLE_MARKER.touch()
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=beat, name="shipboard-idle-beat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
+
+
 def transcribe(wav_path: Path) -> str:
     _ensure_server()
     fields = {"language": WHISPER_LANGUAGE}
@@ -85,7 +153,9 @@ def transcribe(wav_path: Path) -> str:
         method="POST",
     )
     try:
-        with urllib_request.urlopen(req, timeout=120) as resp:
+        with _idle_heartbeat(), urllib_request.urlopen(
+            req, timeout=_request_timeout(wav_path)
+        ) as resp:
             payload = resp.read().decode("utf-8", errors="replace")
     except urllib_error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace").strip()
