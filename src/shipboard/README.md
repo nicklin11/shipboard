@@ -82,9 +82,15 @@ machine's GPU (see the parent README's Remote use section).
 
 ```bash
 shipboard --send                 # one-shot paste + Enter (refuses while recording)
-shipboard --file /tmp/x.wav      # transcribe an existing file
+shipboard process /tmp/x.wav     # transcribe an existing file to stdout
+shipboard process /tmp/x.wav --copy   # ...to the clipboard instead
+shipboard --file /tmp/x.wav      # transcribe an existing file (legacy flag)
 SHIPBOARD_DRY_RUN=1 shipboard --send   # print instead of injecting
 ```
+
+`process` scales its HTTP timeout to the audio length and refreshes the whisper
+idle marker while the request runs, so long recordings are not cut off by a
+fixed timeout or killed by `whisper-idle-stop.timer`.
 
 ## Config
 
