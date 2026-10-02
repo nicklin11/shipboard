@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import json
 import os
 import signal
 import subprocess
@@ -16,7 +17,7 @@ from .config import DAEMON_LOCK_PATH, LOCK_PATH, SCROLL_SEND_ENTER
 from .daemon import _Daemon, run_record_cycle
 from .logstate import _status_main
 from .setup_tui import _config_main, _setup_main, _tui_main
-from .stt import transcribe
+from .stt import (segments_to_timestamped_text, transcribe, transcribe_segments)
 
 def _daemon_pids() -> list[int]:
     # Match only the daemon python process (not bash wrappers / other CLIs).
@@ -157,6 +158,13 @@ def _process_main(argv: list[str]) -> int:
         "--copy", action="store_true",
         help="copy the transcript to the clipboard instead of printing it",
     )
+    parser.add_argument(
+        "--timestamps", nargs="?", const="text", choices=("text", "json"),
+        default=None,
+        help="emit per-segment timings instead of a plain transcript: "
+             "bare flag -> '[hh:mm:ss] text' lines, 'json' -> the raw segments "
+             "array. Output always goes to stdout; --copy is not used",
+    )
     args = parser.parse_args(argv)
 
     wav = args.path.expanduser().resolve()
@@ -176,11 +184,26 @@ def _process_main(argv: list[str]) -> int:
     try:
         _notify("shipboard", "Processing speech...")
         try:
-            text = normalize_text(transcribe(wav))
+            if args.timestamps:
+                segments = transcribe_segments(wav)
+                payload = (
+                    json.dumps(segments, ensure_ascii=False, indent=2)
+                    if args.timestamps == "json"
+                    else segments_to_timestamped_text(segments)
+                )
+            else:
+                text = normalize_text(transcribe(wav))
         except Exception as exc:
             _notify("shipboard", f"Recognition error: {exc}")
             print(f"shipboard: {exc}", file=sys.stderr)
             return 1
+        if args.timestamps:
+            if not payload.strip():
+                _notify("shipboard", "Nothing recognized")
+                print("shipboard: nothing recognized", file=sys.stderr)
+                return 1
+            print(payload)
+            return 0
         if not text:
             _notify("shipboard", "Nothing recognized")
             print("shipboard: nothing recognized", file=sys.stderr)
@@ -254,6 +277,13 @@ def main() -> int:
         "--no-copy", action="store_true",
         help="print the transcript instead of copying",
     )
+    parser.add_argument(
+        "--timestamps", nargs="?", const="text", choices=("text", "json"),
+        default=None,
+        help="with --file, emit per-segment timings: bare flag -> "
+             "'[hh:mm:ss] text' lines, 'json' -> the raw segments array. "
+             "Implies printing to stdout instead of copying",
+    )
     args = parser.parse_args()
 
     if args.send:
@@ -274,11 +304,22 @@ def main() -> int:
                     return 1
                 _notify("shipboard", "Processing speech...")
                 try:
-                    text = transcribe(wav)
+                    if args.timestamps:
+                        segments = transcribe_segments(wav)
+                        payload = (
+                            json.dumps(segments, ensure_ascii=False, indent=2)
+                            if args.timestamps == "json"
+                            else segments_to_timestamped_text(segments)
+                        )
+                    else:
+                        text = normalize_text(transcribe(wav))
                 except Exception as exc:
                     _notify("shipboard", f"Recognition error: {exc}")
                     return 1
-                text = normalize_text(text)
+                if args.timestamps:
+                    if payload.strip():
+                        print(payload)
+                    return 0
                 if args.no_copy:
                     print(text)
                 else:

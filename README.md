@@ -179,6 +179,7 @@ sherpa-onnx + numpy); models go to `~/.local/share/shipboard/models/`.
 | `shipboard --file PATH` | one-shot: transcribe an audio file |
 | `shipboard --send` | one-shot: paste clipboard + Enter |
 | `shipboard --no-copy` | with `--file`/`--seconds`: print instead of copying |
+| `shipboard --timestamps[=json]` | with `process`/`--file`: emit per-segment timings |
 
 `process` is the one to reach for on anything already on disk — it writes to
 stdout so it pipes into a file or another tool, never silently succeeds (a
@@ -191,6 +192,33 @@ fixed 120 s. It also refreshes the whisper idle marker during the request, so
 shipboard process lecture.wav > lecture.md   # straight into a note
 shipboard process lecture.wav --copy         # clipboard instead
 ```
+
+### Segment timestamps
+
+For anything that has to line audio up with something else — subtitles,
+frame-to-paragraph binding, alignment:
+
+```sh
+shipboard process lecture.wav --timestamps          # [hh:mm:ss] text per line
+shipboard process lecture.wav --timestamps json     # raw segments array
+```
+
+Times are **seconds** as floats under the hood, rendered as `[hh:mm:ss]`.
+Stripping the `[hh:mm:ss] ` prefixes from the text form and re-joining with
+spaces reproduces the normalized transcript. The `json` form additionally
+carries per-word `start`/`end`, plus `tokens`, `temperature` and `avg_logprob`
+per segment — which is what makes a downstream alignment check possible rather
+than a guess.
+
+Two implementation facts worth knowing, both measured rather than documented:
+
+- whisper.cpp answers the **default** `response_format=json` with
+  `{"text": ...}` and nothing else. Segments only appear under
+  `verbose_json`, which shipboard requests exclusively on this path — the plain
+  transcript request is byte-for-byte what it always was.
+- A server or proxy that ignores `verbose_json` makes this path fail loudly
+  with a message naming the format, rather than quietly returning a transcript
+  with no timings attached.
 
 State lives in `~/.local/state/shipboard/state.json`; personal config in
 `~/.config/shipboard/shipboard.toml` (created/edited by `setup`; never
