@@ -136,11 +136,26 @@ def _idle_heartbeat(interval: float = IDLE_TOUCH_INTERVAL):
         thread.join(timeout=1.0)
 
 
-def transcribe(wav_path: Path) -> str:
+def _transcribe_payload(wav_path: Path, *, verbose: bool = False) -> tuple[object, str]:
+    """POST the wav to whisper.cpp; return (decoded JSON, raw payload text).
+
+    Single HTTP path for `transcribe` and `transcribe_segments`.
+
+    `verbose=True` asks for `response_format=verbose_json`. That is not a
+    cosmetic flag: whisper.cpp answers the default `json` format with
+    `{"text": ...}` and nothing else — there are no segments in it to read.
+    Only verbose_json carries `segments` (and per-segment `words`). Measured
+    against this box's server, 30 s probe, 9 segments: 0.00-2.44, 2.44-6.20,
+    ... 28.44-29.23 against a duration of 30.0.
+
+    Times in that array are therefore SECONDS as floats, not milliseconds.
+    """
     _ensure_server()
     fields = {"language": WHISPER_LANGUAGE}
     if PROMPT:
         fields["prompt"] = PROMPT
+    if verbose:
+        fields["response_format"] = "verbose_json"
     body, content_type = _multipart_body(fields, wav_path)
     req = urllib_request.Request(
         WHISPER_URL,
@@ -164,14 +179,66 @@ def transcribe(wav_path: Path) -> str:
         raise RuntimeError(f"whisper.cpp unavailable: {exc.reason}") from exc
 
     try:
-        result = json.loads(payload)
+        return json.loads(payload), payload
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"whisper.cpp returned non-JSON: {payload[:300]}") from exc
 
+
+def transcribe(wav_path: Path) -> str:
+    """Plain transcript, no timings. Request is unchanged from before."""
+    result, payload = _transcribe_payload(wav_path)
     text = result.get("text") if isinstance(result, dict) else result
     if not isinstance(text, str):
         raise RuntimeError(f"whisper.cpp: no text in response: {payload[:300]}")
     return text.strip()
+
+
+def transcribe_segments(wav_path: Path) -> list[dict]:
+    """Segments with `start`/`end` in seconds (floats) and per-word timings.
+
+    Raises RuntimeError if the server answered without a usable `segments`
+    array — which is what a build or proxy that ignores verbose_json does.
+    """
+    result, payload = _transcribe_payload(wav_path, verbose=True)
+    segments = result.get("segments") if isinstance(result, dict) else None
+    if not isinstance(segments, list):
+        raise RuntimeError(
+            "whisper.cpp returned no segments (needs response_format=verbose_json): "
+            f"{payload[:300]}"
+        )
+    return segments
+
+
+def format_timestamp(seconds: float) -> str:
+    """Seconds (float, as whisper.cpp reports them) -> [hh:mm:ss]."""
+    total = int(seconds)
+    return f"[{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}]"
+
+
+def segments_to_timestamped_text(segments: list[dict], *, normalize: bool = True) -> str:
+    """`[hh:mm:ss] text` per line, one line per segment.
+
+    Each segment is normalized on its own before the prefix goes on: running
+    normalize_text over the joined output would eat the bracket prefix's
+    spacing and glue the timestamp to the words after it. Stripping the
+    `[hh:mm:ss] ` prefixes from the result yields the normalized transcript.
+    """
+    lines: list[str] = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        text = seg.get("text")
+        if not isinstance(text, str):
+            continue
+        text = text.strip()
+        if not text:
+            continue
+        if normalize:
+            text = normalize_text(text)
+        start = seg.get("start")
+        stamp = format_timestamp(start) if isinstance(start, (int, float)) else "[--:--:--]"
+        lines.append(f"{stamp} {text}")
+    return "\n".join(lines)
 
 
 def _transcribe_copy(wav: Path) -> tuple[str, str]:
