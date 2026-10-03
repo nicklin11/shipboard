@@ -330,6 +330,7 @@ def _status(args: argparse.Namespace) -> int:
     state = health = "unknown"
     exit_code = 0
     models: list[str] | None = None
+    sleeping = False  # exited 0: the idle-stop timer did its job, not a fault
     if not docker:
         problems.append("docker not installed")
     else:
@@ -341,7 +342,15 @@ def _status(args: argparse.Namespace) -> int:
             if state == "absent":
                 problems.append(f"container {CONTAINER} does not exist — `shipboard backend up`")
             elif state in ("exited", "dead"):
-                problems.append(f"container {state} (exit {exit_code}) — `shipboard backend up`")
+                # The whole design is that the container sleeps: idle-stop
+                # stops it after WHISPER_IDLE_SECONDS and the proxy does
+                # `docker start` on the next request. Exit 0 with a live proxy
+                # is the intended idle state, so it is not a fault — anything
+                # else is. Checked against the proxy below.
+                sleeping = exit_code == 0 and state == "exited"
+                if not sleeping:
+                    problems.append(
+                        f"container {state} (exit {exit_code}) — `shipboard backend up`")
             elif state != "running":
                 problems.append(f"container {state}")
             elif health != "healthy":
@@ -356,6 +365,8 @@ def _status(args: argparse.Namespace) -> int:
     proxy = _unit_active(PROXY_UNIT)
     if proxy != "active":
         problems.append(f"proxy unit {PROXY_UNIT} {proxy} — `shipboard backend up`")
+        if sleeping:
+            problems.append("container is stopped and no proxy will wake it")
 
     health_url = HEALTH_URL
     reachable = _http_ok(health_url)
@@ -366,7 +377,7 @@ def _status(args: argparse.Namespace) -> int:
     snapshot = {
         "ready": not problems,
         "container": {"name": CONTAINER, "state": state, "health": health,
-                      "exit_code": exit_code},
+                      "exit_code": exit_code, "sleeping": sleeping},
         "model": {"volume": VOLUME, "files": models,
                   "present": bool(models)},
         "proxy_unit": {"name": PROXY_UNIT, "state": proxy},
@@ -377,11 +388,16 @@ def _status(args: argparse.Namespace) -> int:
     if args.json:
         return _status_json(snapshot)
 
-    print(f"container  {CONTAINER}: {state}"
-          + (f" (health {health})" if health != "none" else "")
-          + (f" exit={exit_code}" if exit_code else ""))
+    if sleeping:
+        shown = "stopped (idle — the proxy wakes it on the next request)"
+    else:
+        shown = state + (f" (health {health})" if health != "none" else "")
+        if exit_code:
+            shown += f" exit={exit_code}"
+    print(f"container  {CONTAINER}: {shown}")
     if models is None:
-        print(f"model      {VOLUME}: unknown (container not running)")
+        print(f"model      {VOLUME}: unknown (container not running — "
+              "reported once it wakes)")
     else:
         print(f"model      {VOLUME}: {'present' if models else 'ABSENT'}"
               + (f" — {', '.join(models)}" if models else ""))

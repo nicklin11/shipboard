@@ -278,8 +278,20 @@ check("missing container is its own failure mode",
 
 code, out = _status_case(Fake(container="exited|unhealthy|137"))
 payload = json.loads(out)
-check("exited container is its own failure mode",
+check("crashed container is its own failure mode",
       code == 1 and any("exit 137" in p for p in payload["problems"]))
+
+# the designed idle state: idle-stop stopped it, the proxy wakes it on demand
+code, out = _status_case(Fake(container="exited|unhealthy|0"))
+payload = json.loads(out)
+check("idle-stopped container is ready, not a fault",
+      code == 0 and payload["ready"] is True and payload["container"]["sleeping"] is True,
+      out.strip()[:160])
+
+code, out = _status_case(Fake(container="exited|unhealthy|0", unit="inactive"), reachable=False)
+payload = json.loads(out)
+check("stopped container with no proxy is a fault",
+      code == 1 and any("no proxy will wake it" in p for p in payload["problems"]))
 
 code, out = _status_case(Fake(models=[]))
 payload = json.loads(out)
