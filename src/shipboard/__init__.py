@@ -16,7 +16,8 @@ are layout-independent, so Cyrillic clipboard text pastes correctly in any
 layout. Falls back to wtype if uinput is unavailable.
 
 Requires: pw-record (PipeWire), python-evdev, wl-clipboard, whisper-local
-container (see ~/.config/shipboard/docker-compose.yml + whisper-wake-proxy).
+container (`shipboard backend up` installs the container, the proxy unit and
+the whisper_url config entry).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

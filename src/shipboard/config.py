@@ -21,8 +21,8 @@ DEFAULT_CONFIG_TEXT = """\
 # Precedence: defaults < this file < environment variables (SHIPBOARD_*).
 
 # Speech-to-text server (local wake proxy or a remote tailnet host)
-whisper_url = "http://127.0.0.1:10300/inference"
-whisper_health_url = "http://127.0.0.1:10300/health"
+whisper_url = "http://127.0.0.1:10301/inference"
+whisper_health_url = "http://127.0.0.1:10301/health"
 whisper_container = "whisper-local"
 whisper_language = "auto"  # whisper language: auto / ru / en / ...
 
@@ -124,9 +124,9 @@ def _as_bool(v) -> bool:
 
 
 WHISPER_URL = _cfg("whisper_url", "WHISPER_CPP_URL",
-                   "http://127.0.0.1:10300/inference")
+                   "http://127.0.0.1:10301/inference")
 HEALTH_URL = _cfg("whisper_health_url", "WHISPER_CPP_HEALTH_URL",
-                  "http://127.0.0.1:10300/health")
+                  "http://127.0.0.1:10301/health")
 WHISPER_CONTAINER = _cfg("whisper_container", "WHISPER_CONTAINER",
                          "whisper-local")
 WHISPER_LANGUAGE = _cfg("whisper_language", "SHIPBOARD_WHISPER_LANGUAGE",
@@ -431,8 +431,8 @@ _FIELD_CHOICES = {
 
 def _field_defaults() -> dict:
     return {
-        "whisper_url": "http://127.0.0.1:10300/inference",
-        "whisper_health_url": "http://127.0.0.1:10300/health",
+        "whisper_url": "http://127.0.0.1:10301/inference",
+        "whisper_health_url": "http://127.0.0.1:10301/health",
         "whisper_container": "whisper-local",
         "whisper_language": "auto",
         "record_target": "default",

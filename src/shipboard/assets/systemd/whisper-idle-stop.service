@@ -1,0 +1,11 @@
+[Unit]
+# Installed by `shipboard backend up`: the CAPS placeholder below is
+# substituted with the installed asset path. Re-running `backend up` rewrites
+# this file.
+Description=Stop the local Whisper container after idle timeout
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=WHISPER_IDLE_SECONDS=300
+ExecStart=/usr/bin/bash @IDLE_STOP_SCRIPT@

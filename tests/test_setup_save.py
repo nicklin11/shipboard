@@ -199,7 +199,7 @@ check(parsed["wakeword_silence_level"] == 250.0,
       "float roundtrip: wakeword_silence_level")
 check(parsed["tap_stop_silence"] == 0.0, "float roundtrip: tap_stop_silence")
 check(parsed["prompt"] == "тест: Docker, config", "unicode prompt roundtrip")
-check(parsed["whisper_url"] == "http://127.0.0.1:10300/inference",
+check(parsed["whisper_url"] == "http://127.0.0.1:10301/inference",
       "default str preserved")
 
 # the sample bind: rightalt tap=record, hold=record_send

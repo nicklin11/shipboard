@@ -1,0 +1,16 @@
+[Unit]
+# Installed (not enabled) by `shipboard backend up`: @SHIPBOARD_BIN@ is the
+# absolute path of the installed console script. Enable it yourself after
+# `shipboard setup`:
+#   systemctl --user enable --now shipboard
+Description=shipboard voice input daemon (Pause / Scroll Lock)
+After=pipewire.socket
+
+[Service]
+Type=simple
+ExecStart=@SHIPBOARD_BIN@
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
