@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shipboard"
-version = "0.1.0"
+version = "0.2.0"
+description = "Voice dictation daemon for Pause/Scroll Lock with a local whisper.cpp backend"
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
     "evdev; platform_system == 'Linux'",
@@ -18,3 +21,13 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Deploy assets (compose file, scripts, systemd templates) ship inside the
+# wheel so `shipboard backend up` works from a pipx venv — never from a
+# checkout. Must list every subdirectory explicitly.
+[tool.setuptools.package-data]
+shipboard = [
+    "assets/docker-compose.yml",
+    "assets/scripts/*",
+    "assets/systemd/*",
+]

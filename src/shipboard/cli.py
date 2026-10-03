@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from .actions import _notify, copy_to_clipboard, normalize_text, send_keys
+from .backend import backend_main
 from .config import DAEMON_LOCK_PATH, LOCK_PATH, SCROLL_SEND_ENTER
 from .daemon import _Daemon, run_record_cycle
 from .logstate import _status_main
@@ -248,6 +249,8 @@ def main() -> int:
         return _restart_main()
     if sys.argv[1:2] == ["process"]:
         return _process_main(sys.argv[2:])
+    if sys.argv[1:2] == ["backend"]:
+        return backend_main(sys.argv[2:])
 
     parser = argparse.ArgumentParser(
         description=(
@@ -255,6 +258,7 @@ def main() -> int:
             "CLI subcommands: daemon/start (run detached), stop (SIGTERM), "
             "restart (systemd or respawn), status (state), "
             "process PATH (transcribe a recorded file to stdout), "
+            "backend up|status (whisper-local container + proxy unit), "
             "config (TOML editor), --send (paste+Enter).\n"
             "Interactive: setup (full-screen TUI, default when a terminal; "
             "--cli forces the numbered dialog), tui/setup-tui (curses setup)."

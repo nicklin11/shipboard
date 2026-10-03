@@ -1,3 +1,7 @@
+# Ships as package data (src/shipboard/assets/) and is started by
+# `shipboard backend up`; the relative bind mount below resolves against this
+# file's directory, so the stack works from any install location — pipx venv,
+# site-packages, or a git checkout.
 name: whisper-local
 
 x-log-options: &log-options

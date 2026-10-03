@@ -18,7 +18,7 @@ CONTAINER = os.environ.get("WHISPER_CONTAINER", "whisper-local")
 BACKEND_HOST = "127.0.0.1"
 BACKEND_PORT = int(os.environ.get("WHISPER_BACKEND_PORT", "10302"))
 LISTEN_HOST = os.environ.get("WHISPER_PROXY_HOST", "127.0.0.1")
-LISTEN_PORT = int(os.environ.get("WHISPER_PROXY_PORT", "10300"))
+LISTEN_PORT = int(os.environ.get("WHISPER_PROXY_PORT", "10301"))
 START_TIMEOUT = float(os.environ.get("WHISPER_START_TIMEOUT", "60"))
 IDLE_MARKER = Path(
     os.environ.get("WHISPER_IDLE_MARKER", "/tmp/whisper-local-last-use")

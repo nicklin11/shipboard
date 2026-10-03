@@ -4,8 +4,8 @@
 # (default location: ~/.config/shipboard/shipboard.toml)
 
 # Speech-to-text server (local wake proxy or a remote tailnet host)
-whisper_url = "http://127.0.0.1:10300/inference"
-whisper_health_url = "http://127.0.0.1:10300/health"
+whisper_url = "http://127.0.0.1:10301/inference"
+whisper_health_url = "http://127.0.0.1:10301/health"
 whisper_container = "whisper-local"
 whisper_language = "auto"   # whisper language: auto / ru / en / ...
 

@@ -1,0 +1,19 @@
+[Unit]
+# Installed by `shipboard backend up`: the CAPS placeholders below are
+# substituted with the installed asset paths and the resolved listen address.
+# Re-running `backend up` rewrites this file, so machine-specific values belong
+# in a drop-in instead:
+#   ~/.config/systemd/user/whisper-tailnet-proxy.service.d/override.conf
+Description=On-demand proxy for the local Whisper container (tailnet address when available, else loopback)
+After=docker.service
+
+[Service]
+Environment=WHISPER_PROXY_HOST=@PROXY_HOST@
+Environment=WHISPER_PROXY_PORT=@PROXY_PORT@
+Environment=WHISPER_BACKEND_PORT=@BACKEND_PORT@
+ExecStart=/usr/bin/python3 @PROXY_SCRIPT@
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
