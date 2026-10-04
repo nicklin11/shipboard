@@ -20,6 +20,16 @@ BACKEND_PORT = int(os.environ.get("WHISPER_BACKEND_PORT", "10302"))
 LISTEN_HOST = os.environ.get("WHISPER_PROXY_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.environ.get("WHISPER_PROXY_PORT", "10301"))
 START_TIMEOUT = float(os.environ.get("WHISPER_START_TIMEOUT", "60"))
+# Socket timeout for the forwarded request. whisper.cpp answers only after it
+# has transcribed everything it was sent, so this is a wall on the server-side
+# work of one /inference call. Measured on this box (large-v3-turbo, silero
+# VAD, 6 threads, Vulkan): 4520 s of audio -> 253 s end to end, 7006 s -> 382
+# s, i.e. ~0.055x realtime; the issue was filed against a 315 s run of that
+# same lecture. The unset default keeps the historical 300 for installs that
+# never set it, which is below the cost of a long lecture. A host that
+# transcribes lectures raises it from the unit's drop-in:
+#   Environment=WHISPER_REQUEST_TIMEOUT=1800
+REQUEST_TIMEOUT = float(os.environ.get("WHISPER_REQUEST_TIMEOUT", "300"))
 IDLE_MARKER = Path(
     os.environ.get("WHISPER_IDLE_MARKER", "/tmp/whisper-local-last-use")
 )
@@ -149,7 +159,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             headers["Content-Length"] = str(len(body))
 
         connection = http.client.HTTPConnection(
-            BACKEND_HOST, BACKEND_PORT, timeout=300
+            BACKEND_HOST, BACKEND_PORT, timeout=REQUEST_TIMEOUT
         )
         try:
             connection.request(self.command, path, body=body or None, headers=headers)
