@@ -336,6 +336,45 @@ check("backend up exposes the port overrides",
 code, out = _ns("status", ["--help"])
 check("backend status exposes --json", "--json" in out)
 
+# --- 7. proxy request timeout is configurable --------------------------------
+# Issue #12: the forwarded socket timeout was hardcoded at 300, below what one
+# lecture costs this host (253-315 s of server work), so a long request was
+# abandoned by the proxy while whisper.cpp was still working.
+def _load_proxy(env_value):
+    """Run a fresh copy of the asset proxy script under a chosen env.
+
+    compile/exec rather than importlib: the script lives in the assets tree, and
+    a cached .pyc written next to it is a binary file that the walk in section 1
+    reads as text — the check would pass once and fail on every later run.
+    """
+    import types
+
+    script = assets / "scripts" / "whisper_wake_proxy.py"
+    saved = os.environ.get("WHISPER_REQUEST_TIMEOUT")
+    if env_value is None:
+        os.environ.pop("WHISPER_REQUEST_TIMEOUT", None)
+    else:
+        os.environ["WHISPER_REQUEST_TIMEOUT"] = env_value
+    try:
+        module = types.ModuleType("shipboard_proxy_asset")
+        exec(compile(script.read_text(), str(script), "exec"), module.__dict__)
+        return module
+    finally:
+        if saved is None:
+            os.environ.pop("WHISPER_REQUEST_TIMEOUT", None)
+        else:
+            os.environ["WHISPER_REQUEST_TIMEOUT"] = saved
+
+
+proxy_default = _load_proxy(None)
+check("proxy keeps 300 s as the unset default", proxy_default.REQUEST_TIMEOUT == 300.0,
+      str(proxy_default.REQUEST_TIMEOUT))
+check("WHISPER_REQUEST_TIMEOUT is read from the environment",
+      _load_proxy("1800").REQUEST_TIMEOUT == 1800.0)
+check("no hardcoded timeout is left in the forwarding call",
+      "timeout=300" not in (assets / "scripts" / "whisper_wake_proxy.py").read_text()
+      and "timeout=REQUEST_TIMEOUT" in (assets / "scripts" / "whisper_wake_proxy.py").read_text())
+
 os.environ.clear()
 os.environ.update(saved_env)
 
