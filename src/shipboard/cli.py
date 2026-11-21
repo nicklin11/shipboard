@@ -14,8 +14,10 @@ from pathlib import Path
 
 from .actions import _notify, copy_to_clipboard, normalize_text, send_keys
 from .backend import backend_main
-from .config import DAEMON_LOCK_PATH, LOCK_PATH, SCROLL_SEND_ENTER
+from .config import (DAEMON_LOCK_PATH, LOCK_PATH, SCROLL_SEND_ENTER,
+                     SHOW_TRANSCRIPT)
 from .daemon import _Daemon, run_record_cycle
+from .failed import list_failed
 from .locks import open_lock
 from .logstate import _daemon_running, _status_main
 from .setup_tui import _config_main, _setup_main, _tui_main
@@ -221,12 +223,38 @@ def _process_main(argv: list[str]) -> int:
             except Exception as exc:
                 print(f"shipboard: copy failed: {exc}", file=sys.stderr)
                 return 1
-            _notify("shipboard", f"Copied: {text[:100]}")
+            _notify("shipboard", "Copied: " + (
+                text[:100] if SHOW_TRANSCRIPT else f"{len(text)} chars"))
         else:
             print(text)
         return 0
     finally:
         lock_fh.close()
+
+
+def _retry_main(argv: list[str]) -> int:
+    """Re-run transcription on a recording kept after an STT failure."""
+    parser = argparse.ArgumentParser(
+        prog="shipboard retry",
+        description="Retry the newest recording kept after a failed "
+                    "transcription (copies the result to the clipboard).",
+    )
+    parser.add_argument("--list", action="store_true",
+                        help="list kept recordings, newest first, and exit")
+    args = parser.parse_args(argv)
+    kept = list_failed()
+    if args.list:
+        for path in reversed(kept):
+            print(path)
+        return 0
+    if not kept:
+        print("shipboard: no failed recordings to retry", file=sys.stderr)
+        return 1
+    newest = kept[-1]
+    rc = _process_main([str(newest), "--copy"])
+    if rc == 0:
+        newest.unlink(missing_ok=True)
+    return rc
 
 
 def main() -> int:
@@ -251,6 +279,8 @@ def main() -> int:
         return _restart_main()
     if sys.argv[1:2] == ["process"]:
         return _process_main(sys.argv[2:])
+    if sys.argv[1:2] == ["retry"]:
+        return _retry_main(sys.argv[2:])
     if sys.argv[1:2] == ["backend"]:
         return backend_main(sys.argv[2:])
 
@@ -260,6 +290,7 @@ def main() -> int:
             "CLI subcommands: daemon/start (run detached), stop (SIGTERM), "
             "restart (systemd or respawn), status (state), "
             "process PATH (transcribe a recorded file to stdout), "
+            "retry (re-transcribe the last recording kept after an STT failure), "
             "backend up|status (whisper-local container + proxy unit), "
             "config (TOML editor), --send (paste+Enter).\n"
             "Interactive: setup (full-screen TUI, default when a terminal; "
