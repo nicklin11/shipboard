@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import http.client
+import json
 import os
 import subprocess
 import threading
@@ -30,6 +31,10 @@ START_TIMEOUT = float(os.environ.get("WHISPER_START_TIMEOUT", "60"))
 # transcribes lectures raises it from the unit's drop-in:
 #   Environment=WHISPER_REQUEST_TIMEOUT=1800
 REQUEST_TIMEOUT = float(os.environ.get("WHISPER_REQUEST_TIMEOUT", "300"))
+# Largest request body the proxy will buffer. The body is held in memory
+# before forwarding, so without a cap any peer that can reach the port can make
+# it allocate arbitrarily much. Default 1 GiB comfortably covers hours of WAV.
+MAX_BODY_BYTES = int(os.environ.get("WHISPER_MAX_BODY_BYTES", str(1 << 30)))
 IDLE_MARKER = Path(
     os.environ.get("WHISPER_IDLE_MARKER", "/tmp/whisper-local-last-use")
 )
@@ -121,10 +126,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self._proxy_request(b"")
 
     def do_POST(self) -> None:  # noqa: N802
+        # Chunked bodies are not decoded here; forwarding one as length 0 would
+        # silently send an empty upload, so refuse it explicitly.
+        if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
+            self._reject(411, "chunked request bodies are not supported; send Content-Length")
+            return
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
-            self._send_error(400, "invalid Content-Length")
+            self._reject(400, "invalid Content-Length")
+            return
+        if length < 0:
+            self._reject(400, "invalid Content-Length")
+            return
+        if length > MAX_BODY_BYTES:
+            self._reject(413, f"request body exceeds {MAX_BODY_BYTES} bytes")
             return
         self._proxy_request(self.rfile.read(length))
 
@@ -177,8 +193,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(response_body)
 
+    def _reject(self, status: int, message: str) -> None:
+        """Error before the body was (fully) read: drop the connection, since
+        the unread bytes would otherwise be parsed as the next request."""
+        self.close_connection = True
+        self._send_error(status, message)
+
     def _send_error(self, status: int, message: str) -> None:
-        payload = f"{{\"error\":{message!r}}}".encode("utf-8")
+        payload = json.dumps({"error": message}).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
