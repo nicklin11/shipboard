@@ -15,7 +15,7 @@ from urllib import request as urllib_request
 
 from .actions import copy_to_clipboard, normalize_text
 from .config import (HEALTH_URL, IDLE_MARKER, PROMPT, WHISPER_CONTAINER,
-                     WHISPER_LANGUAGE, WHISPER_URL)
+                     SHOW_TRANSCRIPT, WHISPER_LANGUAGE, WHISPER_URL)
 
 # A request has to outlive the audio it carries. Measured on this box
 # (large-v3-turbo + silero VAD, 6 threads): ~16x realtime, so an allowance
@@ -242,7 +242,8 @@ def segments_to_timestamped_text(segments: list[dict], *, normalize: bool = True
 
 
 def _transcribe_copy(wav: Path) -> tuple[str, str]:
-    """Transcribe -> normalize -> copy to clipboard. Returns (text, preview).
+    """Transcribe -> normalize -> copy to clipboard. Returns (text, preview), where preview is
+    what may be shown/logged: a text prefix only if show_transcript is on.
     Raises RuntimeError with a user-facing message on any failure."""
     try:
         text = transcribe(wav)
@@ -255,5 +256,8 @@ def _transcribe_copy(wav: Path) -> tuple[str, str]:
         copy_to_clipboard(text)
     except Exception as exc:
         raise RuntimeError(f"Copy failed: {exc}") from exc
-    preview = text if len(text) <= 100 else text[:100] + "…"
+    if SHOW_TRANSCRIPT:
+        preview = text if len(text) <= 100 else text[:100] + "…"
+    else:
+        preview = f"{len(text)} chars"
     return text, preview
