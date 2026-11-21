@@ -31,3 +31,6 @@ shipboard = [
     "assets/scripts/*",
     "assets/systemd/*",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

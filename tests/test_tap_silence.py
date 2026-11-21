@@ -14,10 +14,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-for sp in Path.home().joinpath(".local/share/shipboard-venv/lib").glob(
-        "python*/site-packages"):
-    sys.path.insert(0, str(sp))
-
 sys.path.insert(0, str(REPO / "src"))
 from shipboard import config  # noqa: E402  (thresholds are defined here)
 from shipboard import daemon as sbd  # noqa: E402  (the watcher reads these from daemon's module globals)
