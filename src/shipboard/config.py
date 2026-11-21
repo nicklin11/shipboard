@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .keys import _key_code
+from .locks import runtime_dir
 
 # --------------------------------------------------------------------------
 # Configuration: defaults < TOML config file < environment variables
@@ -208,9 +209,10 @@ KEY_BINDINGS = _parse_key_bindings(_CFG)
 
 RATE = _cfg("record_rate", "SHIPBOARD_RECORD_RATE", 16000, int)
 CHANNELS = _cfg("record_channels", "SHIPBOARD_RECORD_CHANNELS", 1, int)
-LOCK_PATH = Path(_cfg("lock_path", "SHIPBOARD_LOCK", "/tmp/shipboard.lock"))
+LOCK_PATH = Path(_cfg("lock_path", "SHIPBOARD_LOCK",
+                      str(runtime_dir() / "shipboard.lock")))
 DAEMON_LOCK_PATH = Path(_cfg("daemon_lock_path", "SHIPBOARD_DAEMON_LOCK",
-                             "/tmp/shipboard.daemon.lock"))
+                             str(runtime_dir() / "shipboard.daemon.lock")))
 PASTE_COMBO = _cfg("paste_combo", "SHIPBOARD_PASTE_COMBO",
                    "ctrl+shift+v", str.lower)
 SEND_ENTER = _cfg("send_enter", "SHIPBOARD_SEND_ENTER", True, _as_bool)
@@ -475,8 +477,8 @@ def _field_defaults() -> dict:
         "both_send_enter": True,
         # Advanced paths (same defaults as the module constants above)
         "idle_marker": "/tmp/whisper-local-last-use",
-        "lock_path": "/tmp/shipboard.lock",
-        "daemon_lock_path": "/tmp/shipboard.daemon.lock",
+        "lock_path": str(LOCK_PATH),
+        "daemon_lock_path": str(DAEMON_LOCK_PATH),
     }
 
 

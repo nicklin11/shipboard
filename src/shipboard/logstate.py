@@ -9,6 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from .locks import open_lock
 from .config import (DAEMON_LOCK_PATH, DEFAULT_CONFIG_PATH, KEY_BINDINGS,
                      MAX_HOLD, MIN_RECORDING, NORMALIZE, PASTE_COMBO,
                      RECORD_TARGET, SEND_ENTER, WAKEWORD_ENABLED,
@@ -44,7 +45,7 @@ def _write_state(**fields: object) -> None:
 
 def _daemon_running() -> bool:
     try:
-        fh = open(DAEMON_LOCK_PATH, "w")
+        fh = open_lock(DAEMON_LOCK_PATH)
     except OSError:
         return False
     try:
