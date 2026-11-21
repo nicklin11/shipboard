@@ -30,7 +30,16 @@ from .logstate import _log, _write_state
 from .stt import _transcribe_copy
 from .wake import _WAKE_SILENCE_RMS, _wake_listen
 
-def _watch_devices():
+_RESCAN_INTERVAL = 3.0  # seconds between looks for newly (re)attached keyboards
+
+
+def _watch_devices(exclude: frozenset[str] | set[str] = frozenset()):
+    """Open every input device that reports one of the bound keys.
+
+    `exclude` is the set of device paths already open (a rescan must not open
+    them twice). Devices that were opened to probe but don't match are closed
+    so a rescan every few seconds doesn't leak file descriptors.
+    """
     import evdev
 
     wanted = {_key_code(b["key"]) for b in KEY_BINDINGS if b.get("key")}
@@ -38,14 +47,23 @@ def _watch_devices():
         return []
     devices = []
     for path in evdev.list_devices():
+        if path in exclude:
+            continue
+        dev = None
         try:
             dev = evdev.InputDevice(path)
             caps = dev.capabilities(verbose=False)
             keys = caps.get(evdev.ecodes.EV_KEY, [])
             if keys and wanted & set(keys):
                 devices.append(dev)
+                continue
         except Exception:
-            continue
+            pass
+        if dev is not None:
+            try:
+                dev.close()
+            except Exception:
+                pass
     return devices
 
 
@@ -601,6 +619,7 @@ class _Daemon:
                 code_map[_key_code(b["key"])] = b
             except SystemExit:
                 pass
+        rescan_at = time.monotonic() + _RESCAN_INTERVAL
         while True:
             now = time.monotonic()
             while True:
@@ -641,9 +660,18 @@ class _Daemon:
                 except Exception as exc:
                     _log(f"max-hold finish error: {exc!r}")
 
+            if now >= rescan_at:
+                # Hot-plugged keyboards, or one that re-enumerated after
+                # suspend, appear here; ones that vanished were dropped on
+                # their read error below.
+                rescan_at = now + _RESCAN_INTERVAL
+                fresh = _watch_devices(exclude={d.path for d in devices})
+                if fresh:
+                    _log("input devices added: "
+                         + ", ".join(f"{d.path} ({d.name})" for d in fresh))
+                    devices.extend(fresh)
             if not devices:
                 time.sleep(0.5)
-                devices = _watch_devices()
                 continue
             r, _, _ = select.select(devices, [], [], 0.05)
             for dev in r:
