@@ -12,6 +12,8 @@ whisper_language = "auto"   # whisper language: auto / ru / en / ...
 # Recording
 max_hold = 60          # seconds; force-finish a stuck recording
 min_recording = 0.5    # seconds; shorter recordings are discarded
+key_debounce = 0.05   # seconds; a bound key pressed again this soon is ignored (0 = off)
+stop_guard = 0.6      # seconds; tap/toggle recordings can't be key-stopped before this (0 = off)
 record_rate = 16000    # sample rate for pw-record and the wake listener
 record_channels = 1    # channels for pw-record and the wake listener
 

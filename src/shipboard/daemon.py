@@ -21,7 +21,7 @@ from .audio import start_recording, stop_recording
 from .failed import save_failed
 from .locks import open_lock
 from .config import (BOTH_SEND_ENTER, CHANNELS, KEEP_AUDIO_DIR,
-                     KEY_BINDINGS, LOCK_PATH, MAX_HOLD, MIN_RECORDING,
+                     KEY_BINDINGS, KEY_DEBOUNCE, LOCK_PATH, STOP_GUARD, MAX_HOLD, MIN_RECORDING,
                      RATE, RECORD_TARGET, SEND_ENTER, TAP_START_GRACE,
                      TAP_STOP_SILENCE, WAKEWORD_ENABLED,
                      _HOLD_THRESHOLD_DEFAULT)
@@ -228,6 +228,8 @@ class _Daemon:
         self._key_down: dict[int, float] = {}  # code -> down_time
         self._hold_fired: set[int] = set()  # codes where hold threshold already fired
         self._pending_hold: dict[int, float] = {}  # code -> deadline
+        self._last_key_event: dict[int, float] = {}  # code -> last accepted press/release
+        self._ignored_down: set[int] = set()  # presses swallowed by debounce
         self._rec_key: str | None = None  # which key started current recording
         self._rec_mode: str | None = None  # "hold" | "toggle" | "tap"
         # quick map code -> binding
@@ -433,7 +435,7 @@ class _Daemon:
             autosend = (action == "record_send")
             if self.recording:
                 # if same key toggles, finish; else ignore if another recording active
-                if self._rec_key == key:
+                if self._rec_key == key and not self._stop_blocked():
                     # finishing same key — autosend already set? override if needed
                     self.autosend = autosend or self.autosend
                     self._finish_record()
@@ -503,6 +505,35 @@ class _Daemon:
             except Exception:
                 pass
 
+    def _debounced(self, code: int, now: float) -> bool:
+        """True if this press follows the key's previous event too closely
+        and must be ignored (its matching release is then ignored too)."""
+        last = self._last_key_event.get(code)
+        if KEY_DEBOUNCE > 0 and last is not None and now - last < KEY_DEBOUNCE:
+            self._ignored_down.add(code)
+            return True
+        self._last_key_event[code] = now
+        return False
+
+    def _note_release(self, code: int, now: float) -> bool:
+        """Record a release; False if it belongs to an ignored press."""
+        if code in self._ignored_down:
+            self._ignored_down.discard(code)
+            return False
+        self._last_key_event[code] = now
+        return True
+
+    def _stop_blocked(self) -> bool:
+        """A tap/toggle recording that just started can't be key-stopped yet."""
+        if not (STOP_GUARD > 0 and self.recording
+                and self._rec_mode in ("tap", "toggle")):
+            return False
+        if time.monotonic() - self.rec_t0 < STOP_GUARD:
+            _log(f"stop ignored: pressed {time.monotonic() - self.rec_t0:.2f}s "
+                 f"after start (stop_guard {STOP_GUARD:g}s)")
+            return True
+        return False
+
     def _on_key_press(self, code: int) -> None:
         bind = self._binding_for(code)
         if bind is None:
@@ -519,7 +550,8 @@ class _Daemon:
         if toggle:
             # if already recording from this key in toggle mode -> stop
             if self.recording and self._rec_key == key and self._rec_mode == "toggle":
-                self._finish_record()
+                if not self._stop_blocked():
+                    self._finish_record()
                 return
             # if not recording, decide if this is hold vs toggle based on pending hold
             # need to defer: if hold also present, don't start toggle immediately; wait for threshold
@@ -586,7 +618,8 @@ class _Daemon:
         if tap and not hold:
             # only tap: release fires tap — tap as toggle (first release starts, second release stops)
             if self.recording and self._rec_key == key and self._rec_mode == "tap":
-                self._finish_record()
+                if not self._stop_blocked():
+                    self._finish_record()
                 return
             if not self.recording:
                 self._do_action(tap, key, "tap")
@@ -686,9 +719,13 @@ class _Daemon:
                             continue
                         try:
                             if event.value == 1:
+                                if self._debounced(code, time.monotonic()):
+                                    continue
                                 self._key_down.setdefault(code, now)
                                 self._on_key_press(code)
                             elif event.value == 0:
+                                if not self._note_release(code, time.monotonic()):
+                                    continue
                                 self._on_key_release(code)
                         except Exception as exc:  # one bad event must not kill the daemon
                             _log(f"key handler error: {exc!r}")

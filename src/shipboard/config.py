@@ -141,6 +141,15 @@ IDLE_MARKER = Path(_cfg("idle_marker", "WHISPER_IDLE_MARKER",
                         "/tmp/whisper-local-last-use"))
 MAX_HOLD = _cfg("max_hold", "SHIPBOARD_MAX_HOLD", 60.0, float)
 MIN_RECORDING = _cfg("min_recording", "SHIPBOARD_MIN_RECORDING", 0.5, float)
+# Accidental / too-fast press guards (0 disables each):
+#  key_debounce: a press of a bound key arriving this soon after that key's
+#    previous press/release is ignored (switch bounce, jittery double events).
+#  stop_guard: a tap/toggle recording cannot be stopped by a key press until it
+#    has run this long, so a fast double-press doesn't start and instantly
+#    cancel (and discard) a recording. Hold release and silence auto-stop are
+#    not affected.
+KEY_DEBOUNCE = _cfg("key_debounce", "SHIPBOARD_KEY_DEBOUNCE", 0.05, float)
+STOP_GUARD = _cfg("stop_guard", "SHIPBOARD_STOP_GUARD", 0.6, float)
 # (no legacy key vars — configure via [[key_bind]] only)
 
 # --- key -> behaviour bindings ---
@@ -326,6 +335,12 @@ _SETUP_SECTIONS = [
          "Force-finish a stuck recording after this long", float, "seconds"),
         ("min_recording", "Min recording",
          "Shorter recordings are discarded as noise", float, "seconds"),
+        ("key_debounce", "Key debounce",
+         "Ignore a bound key pressed again this soon (switch bounce)",
+         float, "seconds, 0 disables"),
+        ("stop_guard", "Stop guard",
+         "Tap/toggle recordings can't be key-stopped until they ran this long",
+         float, "seconds, 0 disables"),
         ("tap_stop_silence", "Tap stop silence",
          "Tap/toggle-started recording auto-stops after this much silence",
          float, "seconds, 0 disables"),
@@ -456,6 +471,8 @@ def _field_defaults() -> dict:
         "send_enter": True,
         "max_hold": 60.0,
         "min_recording": 0.5,
+        "key_debounce": 0.05,
+        "stop_guard": 0.6,
         "normalize": True,
         "show_transcript": False,
         "prompt": "",
