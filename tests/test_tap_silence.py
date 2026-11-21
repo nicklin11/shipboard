@@ -21,14 +21,16 @@ from shipboard import daemon as sbd  # noqa: E402  (the watcher reads these from
 assert sbd.TAP_STOP_SILENCE is config.TAP_STOP_SILENCE
 assert sbd.TAP_START_GRACE is config.TAP_START_GRACE
 
-import numpy as np  # noqa: E402  (must be importable like in the watcher)
-
 # speed up: real thresholds are tuned for humans, not CI
 sbd.TAP_STOP_SILENCE = 0.15
 sbd.TAP_START_GRACE = 0.05
 
 VOICE = b"\x00\x40"      # int16 0x4000 -> rms ~0.5, way above silence threshold
 QUIET = b"\x00\x00"
+
+assert abs(sbd._rms_s16(VOICE * 100) - 0.5) < 1e-6
+assert sbd._rms_s16(QUIET * 100) == 0.0
+assert sbd._rms_s16(b"") == 0.0 and sbd._rms_s16(b"\x01") == 0.0  # empty / odd tail
 
 
 class FakePopen:
