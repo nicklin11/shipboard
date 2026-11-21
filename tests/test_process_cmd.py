@@ -153,10 +153,40 @@ held.close()
 check("lock held -> rc 1", rc == 1, f"rc={rc}")
 check("lock held -> explains why", "recording in progress" in err.getvalue(), err.getvalue().strip())
 
-# --- 5. dispatch: `process` must not be mistaken for the daemon --------------
-# _daemon_pids only accepts len(argv)==2; `shipboard process PATH` has 3.
-argv = ["shipboard", "process", str(short)]
-check("process argv not daemon-shaped", len(argv) != 2)
+# --- 5. stop/restart find the daemon by its lock, not by argv ----------------
+# (#3: argv matching killed the whisper proxy and missed the real daemon.)
+import os
+import subprocess
+
+from shipboard import logstate as sbl
+
+dlock = tmp / "daemon.lock"
+sbc.DAEMON_LOCK_PATH = dlock
+sbl.DAEMON_LOCK_PATH = dlock
+check("no daemon lock held -> no pids", sbc._daemon_pids() == [])
+
+holder = subprocess.Popen([sys.executable, "-c", f"""
+import fcntl, os, sys
+sys.path.insert(0, {str(REPO / "src")!r})
+from shipboard.locks import open_lock
+fh = open_lock({str(dlock)!r})
+fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+fh.seek(0); fh.truncate(); fh.write(str(os.getpid())); fh.flush()
+print("ready", flush=True)
+sys.stdin.read()
+"""], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+try:
+    holder.stdout.readline()
+    check("lock holder is reported as the daemon", sbc._daemon_pids() == [holder.pid],
+          str(sbc._daemon_pids()))
+    check("an unrelated python process is not", bystander.pid not in sbc._daemon_pids())
+finally:
+    holder.stdin.close()
+    holder.wait(timeout=10)
+    bystander.kill()
+    bystander.wait()
+check("stale pid file with free lock -> no pids", sbc._daemon_pids() == [])
 
 print()
 if failures:

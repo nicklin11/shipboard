@@ -17,34 +17,27 @@ from .backend import backend_main
 from .config import DAEMON_LOCK_PATH, LOCK_PATH, SCROLL_SEND_ENTER
 from .daemon import _Daemon, run_record_cycle
 from .locks import open_lock
-from .logstate import _status_main
+from .logstate import _daemon_running, _status_main
 from .setup_tui import _config_main, _setup_main, _tui_main
 from .stt import (segments_to_timestamped_text, transcribe, transcribe_segments)
 
 def _daemon_pids() -> list[int]:
-    # Match only the daemon python process (not bash wrappers / other CLIs).
-    # The daemon is always launched as `python <path>` with NO subcommand;
-    # `shipboard setup` / `status` / `--send` etc. carry extra argv entries
-    # and must never be killed by stop/restart.
-    out = subprocess.run(["pgrep", "-f", "python3 .*shipboard"],
-                         capture_output=True, text=True)
-    pids = []
-    for pid in out.stdout.split():
-        try:
-            pid = int(pid)
-        except ValueError:
-            continue
-        if pid == os.getpid():
-            continue  # never kill our own CLI process
-        try:
-            argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-            argv = [a.decode(errors="replace") for a in argv if a]
-        except OSError:
-            continue  # process exited between pgrep and read
-        if len(argv) != 2:
-            continue  # has a subcommand/flag -> not the daemon
-        pids.append(pid)
-    return pids
+    """PIDs of the running daemon.
+
+    The daemon holds an exclusive flock on DAEMON_LOCK_PATH and records its pid
+    there, so the lock — not a guess from process argv — says whether one is
+    running and which process it is. (Matching argv shapes found the whisper
+    proxy instead of the daemon and missed a pipx-launched daemon.)
+    """
+    if not _daemon_running():
+        return []
+    try:
+        pid = int(Path(DAEMON_LOCK_PATH).read_text().strip())
+    except (OSError, ValueError):
+        return []
+    if pid == os.getpid() or not Path(f"/proc/{pid}").exists():
+        return []
+    return [pid]
 
 
 def _restart_daemon() -> str:
@@ -78,6 +71,11 @@ def _daemon_main() -> int:
     except OSError:
         print("shipboard: daemon already running", file=sys.stderr)
         return 0
+    # Record our pid for stop/restart (we hold the flock, so this is ours).
+    lock_fh.seek(0)
+    lock_fh.truncate()
+    lock_fh.write(f"{os.getpid()}\n")
+    lock_fh.flush()
     daemon = _Daemon()
 
     def _terminate(signum, _frame):
