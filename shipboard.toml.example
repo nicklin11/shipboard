@@ -31,7 +31,9 @@ send_enter = true              # also press Enter after pasting
 # Pause is still treated as "both held".
 grace = 0.15
 
-# Dictation normalization: "тильда слэш точка конфиг" -> "~/.config"
+# Dictation normalization: "тильда слэш точка конфиг" -> "~/.config". Ambiguous words
+# (at, dot, star, space, plus, minus, точка, вопрос, ...) become symbols only next to
+# another symbol word, so ordinary prose is left alone.
 normalize = true
 
 # Optional initial prompt sent to whisper (domain vocabulary).
