@@ -7,7 +7,6 @@ this module imports cleanly on any OS and a missing native backend fails with
 a clear RuntimeError instead of a confusing ImportError.
 
 Integration points (swap these in shipboard.py to go cross-platform):
-  * get_input_backend()  -> InputListener       (Linux evdev; NotImplementedError elsewhere)
   * get_inject_backend() -> inject(combo, enter) (Linux uinput -> wtype; pynput on macOS/Windows)
   * copy_to_clipboard()  -> wl-copy / xclip / pbcopy / clip.exe, auto-detected
   * start_recording()    -> pw-record (Linux PipeWire), ffmpeg fallback
@@ -84,139 +83,6 @@ def _backend_choice(name: str, allowed: tuple[str, ...]) -> str | None:
             f"{', '.join(allowed)}"
         )
     return value
-
-
-# --------------------------------------------------------------------------
-# Input listening (Linux evdev)
-# --------------------------------------------------------------------------
-
-class InputListener:
-    """Abstraction over evdev key input.
-
-    Scans /dev/input/event* for devices that report any of ``key_codes``,
-    opens the matching devices, and exposes events either via iteration or a
-    callback. Consumed like:
-
-        listener = get_input_backend([key_code("KEY_PAUSE")])
-        for code, value in listener:      # value: 1 = press, 0 = release
-            ...
-
-    Non-Linux platforms get a stub that raises NotImplementedError.
-    """
-
-    def __init__(self, key_codes, devices="/dev/input/event*"):
-        import evdev
-
-        self._evdev = evdev
-        self._wanted = set(key_codes)
-        self._devices = []
-        self._callbacks = []
-        for path in evdev.list_devices():
-            if not Path(path).match(devices):
-                continue
-            try:
-                dev = evdev.InputDevice(path)
-                keys = dev.capabilities(verbose=False).get(evdev.ecodes.EV_KEY, [])
-                if self._wanted & set(keys):
-                    self._devices.append(dev)
-            except OSError:
-                continue
-
-    def __iter__(self):
-        import select
-
-        while True:
-            events = self.poll(timeout=0.5)
-            for code, value in events:
-                yield code, value
-
-    def poll(self, timeout=0.0):
-        """Read available events. Returns a list of (key_code, value) tuples
-        for the watched keys only; repeats (value 2) are dropped."""
-        import select
-
-        if not self._devices:
-            return []
-        r, _, _ = select.select(self._devices, [], [], timeout)
-        out = []
-        for dev in r:
-            try:
-                for event in dev.read():
-                    if event.type != self._evdev.ecodes.EV_KEY:
-                        continue
-                    if event.value == 2:  # auto-repeat
-                        continue
-                    if event.code not in self._wanted:
-                        continue
-                    out.append((event.code, event.value))
-                    for cb in self._callbacks:
-                        cb(event.code, event.value)
-            except (OSError, ValueError):
-                try:
-                    dev.close()
-                except OSError:
-                    pass
-                self._devices.remove(dev)
-        return out
-
-    def on(self, callback):
-        """Register a callback invoked with (key_code, value) per key event."""
-        self._callbacks.append(callback)
-
-    def close(self):
-        for dev in self._devices:
-            try:
-                dev.close()
-            except OSError:
-                pass
-        self._devices = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        self.close()
-
-
-class _InputUnavailable:
-    """Non-Linux input stub: fails loudly instead of silently doing nothing."""
-
-    def __init__(self, *_args, **_kwargs):
-        raise NotImplementedError(
-            "key input listening is only implemented on Linux (evdev); "
-            f"current platform is {detect_platform()!r}"
-        )
-
-    def __iter__(self):  # pragma: no cover - unreachable, kept for the API shape
-        return self
-
-
-def key_code(name: str) -> int:
-    """Resolve an evdev key name like "KEY_PAUSE" or "pause" to its code."""
-    from evdev import ecodes
-
-    if name in ecodes.ecodes:
-        return ecodes.ecodes[name]
-    return ecodes.ecodes["KEY_" + name.upper()]
-
-
-def get_input_backend(key_codes):
-    """Return an InputListener watching ``key_codes``.
-
-    Raises RuntimeError if evdev is unavailable, NotImplementedError on any
-    non-Linux platform. ``input_device_glob`` in shipboard.toml narrows the
-    scanned devices (empty/missing = /dev/input/event*).
-    """
-    if detect_platform() != "linux":
-        return _InputUnavailable
-    try:
-        import evdev  # noqa: F401
-    except ImportError as exc:
-        raise RuntimeError(
-            "evdev is required for Linux key input (pip install python-evdev)"
-        ) from exc
-    glob = str(_get_config().get("input_device_glob", "")).strip()
-    return InputListener(key_codes, devices=glob or "/dev/input/event*")
 
 
 # --------------------------------------------------------------------------
@@ -675,15 +541,22 @@ def _notify_linux(title: str, msg: str) -> None:
 
 def _notify_macos(title: str, msg: str) -> None:
     subprocess.run(
-        ["osascript", "-e",
-         f'display notification "{msg}" with title "{title}"'],
+        ["osascript",
+         "-e", "on run argv",
+         "-e", "display notification (item 1 of argv) with title (item 2 of argv)",
+         "-e", "end run",
+         msg, title],
         timeout=5, capture_output=True,
     )
 
 
 def _notify_windows(title: str, msg: str) -> None:
     def esc(s: str) -> str:
-        return s.replace("'", "''")
+        # PowerShell treats the typographic single quotes as quote characters
+        # too, so each one must be doubled inside a '...' literal.
+        return "".join(
+            c * 2 if c in "'\u2018\u2019\u201a\u201b" else c for c in s
+        )
     script = "; ".join([
         "[Windows.UI.Notifications.ToastNotificationManager, "
         "Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null",
