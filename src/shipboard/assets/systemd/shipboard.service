@@ -5,6 +5,8 @@
 #   systemctl --user enable --now shipboard
 Description=shipboard voice input daemon (Pause / Scroll Lock)
 After=pipewire.socket
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple

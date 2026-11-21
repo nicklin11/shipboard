@@ -77,11 +77,22 @@ def _daemon_main() -> int:
     except OSError:
         print("shipboard: daemon already running", file=sys.stderr)
         return 0
+    daemon = _Daemon()
+
+    def _terminate(signum, _frame):
+        # Unwind through run() so the finally below reaps the recorder and the
+        # interpreter exits normally (atexit then terminates the wake pw-cat).
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _terminate)
     try:
-        _Daemon().run()
+        daemon.run()
     except KeyboardInterrupt:
         pass
     finally:
+        # Ignore further signals so a second SIGTERM can't abort the cleanup.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        daemon.shutdown()
         lock_fh.close()
         try:
             Path(DAEMON_LOCK_PATH).unlink(missing_ok=True)

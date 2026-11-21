@@ -184,6 +184,8 @@ class _Daemon:
         self.grace_deadline: float | None = None
         self.pause_down = False
         self.wake_rec = False
+        self._cycle_lock = None
+        self._tmp_dir = None
         self._inject_q: "queue.Queue[bool]" = queue.Queue()
         # _finish_record is reachable from the key path, the silence watcher
         # and the max-hold check — the claim lock makes sure only one of
@@ -213,16 +215,38 @@ class _Daemon:
             return
         self.autosend = False
         self.grace_deadline = None
-        self._cycle_lock = open(LOCK_PATH, "w")
+        # Acquire lock + tmp dir + recorder as one unit: on ANY failure
+        # (foreign-owned lock file, forced-but-missing backend, no pw-record)
+        # release what was taken and report, instead of leaking the flock/tmp
+        # dir and propagating out of run() into a systemd crash loop.
+        lock_fh = None
+        tmp_dir: Path | None = None
         try:
-            fcntl.flock(self._cycle_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            self._cycle_lock.close()
-            self._cycle_lock = None
+            lock_fh = open(LOCK_PATH, "w")
+            try:
+                fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                lock_fh.close()
+                lock_fh = None
+                self.wake_rec = False
+                return
+            tmp_dir = Path(tempfile.mkdtemp(prefix="shipboard-"))
+            wav = tmp_dir / "rec.wav"
+            self.rec_proc = start_recording(wav)
+        except Exception as exc:
+            _log(f"record start failed: {exc}")
+            if lock_fh is not None:
+                try:
+                    lock_fh.close()
+                except OSError:
+                    pass
+            if tmp_dir is not None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            self.rec_proc = None
+            self.wake_rec = False
+            _notify("shipboard", f"Cannot start recording: {exc}")
             return
-        tmp_dir = Path(tempfile.mkdtemp(prefix="shipboard-"))
-        wav = tmp_dir / "rec.wav"
-        self.rec_proc = start_recording(wav)
+        self._cycle_lock = lock_fh
         self.recording = True
         self._rec_gen += 1
         self.rec_t0 = time.monotonic()
@@ -243,6 +267,7 @@ class _Daemon:
             if not self.recording or self.rec_proc is None:
                 return
             self.recording = False
+            self.wake_rec = False  # the next (key) recording is not wake-controlled
             proc = self.rec_proc
             cycle_lock = getattr(self, "_cycle_lock", None)
             self._cycle_lock = None
@@ -325,6 +350,33 @@ class _Daemon:
                     cycle_lock.close()
                 except OSError:
                     pass
+
+    def shutdown(self) -> None:
+        """Stop an in-flight recording and drop its lock/tmp dir (SIGTERM/exit path).
+
+        Without this the pw-record child outlives the daemon and keeps the
+        microphone open. Safe to call when idle and more than once.
+        """
+        with self._rec_claim:
+            proc, self.rec_proc = self.rec_proc, None
+            lock = getattr(self, "_cycle_lock", None)
+            self._cycle_lock = None
+            tmp_dir = getattr(self, "_tmp_dir", None)
+            self._tmp_dir = None
+            self.recording = False
+            self.wake_rec = False
+        if proc is not None:
+            try:
+                stop_recording(proc)
+            except Exception as exc:
+                _log(f"shutdown: stopping recorder failed: {exc!r}")
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        if lock is not None:
+            try:
+                lock.close()
+            except OSError:
+                pass
 
     def _do_action(self, action: str, key: str, mode: str) -> None:
         if not action:
@@ -562,12 +614,18 @@ class _Daemon:
                     key = bind["key"]
                     # if not already recording, start hold recording
                     if not self.recording:
-                        self._do_action(hold, key, "hold")
+                        try:
+                            self._do_action(hold, key, "hold")
+                        except Exception as exc:
+                            _log(f"hold action error: {exc!r}")
                         # _do_action may have started; ensure mode is hold
                         if self.recording:
                             self._rec_mode = "hold"
             if self.recording and now - self.rec_t0 > MAX_HOLD:
-                self._finish_record()
+                try:
+                    self._finish_record()
+                except Exception as exc:
+                    _log(f"max-hold finish error: {exc!r}")
 
             if not devices:
                 time.sleep(0.5)
@@ -584,11 +642,14 @@ class _Daemon:
                         code = event.code
                         if code not in code_map and code not in self._key_down and code not in self._hold_fired:
                             continue
-                        if event.value == 1:
-                            self._key_down.setdefault(code, now)
-                            self._on_key_press(code)
-                        elif event.value == 0:
-                            self._on_key_release(code)
+                        try:
+                            if event.value == 1:
+                                self._key_down.setdefault(code, now)
+                                self._on_key_press(code)
+                            elif event.value == 0:
+                                self._on_key_release(code)
+                        except Exception as exc:  # one bad event must not kill the daemon
+                            _log(f"key handler error: {exc!r}")
                 except (OSError, ValueError):
                     devices = [d for d in devices if d != dev]
                     try:
