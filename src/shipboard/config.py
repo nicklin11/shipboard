@@ -289,6 +289,10 @@ WAKEWORD_DEBUG = _cfg("wakeword_debug", "SHIPBOARD_WAKEWORD_DEBUG",
                       False, _as_bool)
 DRY_RUN = _cfg("dry_run", "SHIPBOARD_DRY_RUN", False, _as_bool)
 NORMALIZE = _cfg("normalize", "SHIPBOARD_NORMALIZE", True, _as_bool)
+# Dictated text is private: by default notifications, the journal log and
+# state.json carry only a character count. Set true to see a 100-char preview.
+SHOW_TRANSCRIPT = _cfg("show_transcript", "SHIPBOARD_SHOW_TRANSCRIPT",
+                       False, _as_bool)
 PROMPT = _cfg("prompt", "SHIPBOARD_PROMPT", "")
 _keep_audio_dir = _cfg("keep_audio_dir", "SHIPBOARD_KEEP_AUDIO_DIR", "")
 KEEP_AUDIO_DIR = Path(_keep_audio_dir).expanduser() if _keep_audio_dir else None
@@ -340,6 +344,9 @@ _SETUP_SECTIONS = [
          str, "text"),
         ("normalize", "Normalize text",
          'Rewrite spoken phrases into symbols ("тильда слэш" -> "~/.config")',
+         bool, "y / n"),
+        ("show_transcript", "Show transcript",
+         "Include a text preview in notifications, logs and state (off = char count only)",
          bool, "y / n"),
     )),
     (SECTION_WAKE, (
@@ -450,6 +457,7 @@ def _field_defaults() -> dict:
         "max_hold": 60.0,
         "min_recording": 0.5,
         "normalize": True,
+        "show_transcript": False,
         "prompt": "",
         "wakeword_enabled": False,
         "wakeword_cooldown": 2.0,

@@ -24,6 +24,10 @@ Everything runs locally — no cloud, no audio leaves your machine.
                         paste + Enter (send modes)
 ```
 
+## Privacy
+
+Transcripts go only to the clipboard. By default notifications, the journal log and `state.json` show a character count, not the text; set `show_transcript = true` (setup → STT / whisper) to get a 100-character preview there.
+
 ## How the pieces fit
 
 | Piece | What it is | Where it lives |

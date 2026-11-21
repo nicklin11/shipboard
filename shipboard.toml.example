@@ -59,6 +59,7 @@ normalize = true
 
 # Platform / backend overrides (auto = best for the running session)
 # keep_audio_dir = ""             # keep recordings here instead of deleting them
+# show_transcript = false         # true: notifications/logs/state show a text preview (default: char count only)
 # dry_run = false                 # log actions without performing them
 # inject_backend = "auto"         # auto | uinput | wtype | pynput
 # notify_backend = "auto"         # auto | notify-send | osascript | powershell
