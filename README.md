@@ -191,6 +191,7 @@ sherpa-onnx + numpy); models go to `~/.local/share/shipboard/models/`.
 | `shipboard tui` (alias `setup-tui`) | full-screen curses setup: `↑/↓` navigate · `Enter` edit · `s` save · `t` test STT · `p` compositor bind snippets · `r` restart daemon · `q` quit |
 | `shipboard config` | interactive TOML editor |
 | `shipboard process PATH` | transcribe an already-recorded file to stdout (`--copy` to clipboard) |
+| `shipboard retry` (`--list`) | re-transcribe the newest recording kept after an STT failure (`~/.local/state/shipboard/failed/`, newest 10 kept) and copy it |
 | `shipboard --seconds N` | one-shot: record N seconds, transcribe |
 | `shipboard --file PATH` | one-shot: transcribe an audio file |
 | `shipboard --send` | one-shot: paste clipboard + Enter |

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .actions import _notify, send_keys
 from .audio import start_recording, stop_recording
+from .failed import save_failed
 from .locks import open_lock
 from .config import (BOTH_SEND_ENTER, CHANNELS, KEEP_AUDIO_DIR,
                      KEY_BINDINGS, LOCK_PATH, MAX_HOLD, MIN_RECORDING,
@@ -332,11 +333,19 @@ class _Daemon:
                 _log(f"stt ok ({len(text)} chars) result: {preview!r}")
             except RuntimeError as exc:
                 _log(f"stt error: {exc}")
+                msg = str(exc)
+                if msg != "Nothing recognized":
+                    # whisper down / cold / timed out: keep the audio so the
+                    # words are not lost (the temp dir is removed below).
+                    saved = save_failed(wav)
+                    if saved is not None:
+                        _log(f"kept failed recording: {saved}")
+                        msg += " — recording kept, run `shipboard retry`"
                 _write_state(
                     state="idle" if str(exc) == "Nothing recognized" else "error",
-                    text=str(exc)[:200],
+                    text=msg[:200],
                 )
-                _notify("shipboard", str(exc))
+                _notify("shipboard", msg)
                 return
             if autosend:
                 if from_wake:
