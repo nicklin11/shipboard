@@ -5,7 +5,6 @@ failure, so they are executed one per subprocess here. The child gets a
 throwaway HOME / XDG dirs so no test reads or writes the developer's real
 shipboard config, state or lock files.
 """
-import importlib.util
 import os
 import subprocess
 import sys
@@ -15,13 +14,10 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 SCRIPTS = sorted(p for p in HERE.glob("test_*.py") if p.name != Path(__file__).name)
-NEEDS_NUMPY = {"test_tap_silence.py"}
 
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
 def test_script(script, tmp_path):
-    if script.name in NEEDS_NUMPY and importlib.util.find_spec("numpy") is None:
-        pytest.skip("numpy not installed")
     env = {
         k: v for k, v in os.environ.items()
         if not k.startswith(("SHIPBOARD_", "WHISPER_"))

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import array
 import fcntl
+import math
 import os
 import queue
 import select
@@ -25,7 +27,7 @@ from .config import (BOTH_SEND_ENTER, CHANNELS, KEEP_AUDIO_DIR,
 from .keys import _key_code, _key_label
 from .logstate import _log, _write_state
 from .stt import _transcribe_copy
-from .wake import _WAKE_SILENCE_RMS, _WAKE_VENV, _wake_listen
+from .wake import _WAKE_SILENCE_RMS, _wake_listen
 
 def _watch_devices():
     import evdev
@@ -176,6 +178,16 @@ def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:
 # --------------------------------------------------------------------------
 # Daemon
 # --------------------------------------------------------------------------
+def _rms_s16(raw: bytes) -> float:
+    """RMS of native-endian signed 16-bit PCM, normalised to 0..1 (stdlib only:
+    the tap/toggle silence watcher must not depend on numpy)."""
+    samples = array.array("h")
+    samples.frombytes(raw[: len(raw) // 2 * 2])
+    if not samples:
+        return 0.0
+    return math.sqrt(sum(x * x for x in samples) / len(samples)) / 32768.0
+
+
 class _Daemon:
     def __init__(self) -> None:
         self.recording = False
@@ -423,13 +435,6 @@ class _Daemon:
         """
         if gen is None:
             gen = self._rec_gen
-        try:
-            for sp in (_WAKE_VENV / "lib").glob("python*/site-packages"):
-                sys.path.insert(0, str(sp))
-            import numpy as np
-        except Exception as exc:
-            _log(f"tap silence: numpy unavailable ({exc}) — auto-stop off")
-            return
         cmd = ["pw-cat", "--record", "--rate", str(RATE), "--channels",
                str(CHANNELS), "--format", "s16", "--raw", "-"]
         if RECORD_TARGET:
@@ -449,9 +454,8 @@ class _Daemon:
                 raw = proc.stdout.read(int(RATE * CHANNELS * 2 * 0.08))
                 if not raw:
                     break
-                audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
                 now = time.monotonic()
-                rms = float(np.sqrt(np.mean(audio ** 2)))
+                rms = _rms_s16(raw)
                 if rms >= _WAKE_SILENCE_RMS:
                     spoke = True
                     silence_since = None
