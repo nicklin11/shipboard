@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 
 from .keys import _key_code
@@ -100,11 +101,15 @@ wakeword_debug = false            # log the mic level every second
 def _load_toml_config(path: Path) -> dict:
     if not path.is_file():
         return {}
+    import tomllib
     try:
-        import tomllib
         with open(path, "rb") as fh:
             return tomllib.load(fh)
-    except Exception:
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        # Never fall back to defaults silently: a broken file would look
+        # like "all bindings/URLs/wake words vanished" with no explanation.
+        print(f"shipboard: ignoring unreadable config {path}: {exc}",
+              file=sys.stderr)
         return {}
 
 
@@ -489,6 +494,29 @@ def _parse_value(raw: str, conv) -> object:
     return conv(raw.strip())
 
 
+def _toml_str(v) -> str:
+    """Render ``v`` as a TOML basic string (escapes backslash, quote, controls)."""
+    out = ['"']
+    for ch in str(v):
+        o = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\r":
+            out.append("\\r")
+        elif o < 0x20 or o == 0x7F:
+            out.append(f"\\u{o:04x}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
 def _save_config_file(values: dict) -> None:
     lines = [
         "# shipboard configuration (edited with 'shipboard setup')",
@@ -498,24 +526,24 @@ def _save_config_file(values: dict) -> None:
     for key, _label, conv, _section, _desc, _fmt in _SETUP_FIELDS:
         v = values[key]
         if conv is str:
-            lines.append(f'{key} = "{v}"')
+            lines.append(f"{key} = {_toml_str(v)}")
         elif conv is bool:
             lines.append(f"{key} = {'true' if v else 'false'}")
         else:
             lines.append(f"{key} = {v}")
     composed = _compose_keywords(values)
     if composed:
-        lines.append(f'wakeword_keywords = "{composed}"')
+        lines.append(f"wakeword_keywords = {_toml_str(composed)}")
     # emit key_bind tables LAST so bare keys are not swallowed (TOML: bare keys after [[array]] belong to that table)
     binds = values.get("_key_binds")
     if isinstance(binds, list) and binds:
         for b in binds:
             lines.append("")
             lines.append("[[key_bind]]")
-            lines.append(f'key = "{b.get("key","")}"')
-            if b.get("tap"): lines.append(f'tap = "{b["tap"]}"')
-            if b.get("hold"): lines.append(f'hold = "{b["hold"]}"')
-            if b.get("toggle"): lines.append(f'toggle = "{b["toggle"]}"')
+            lines.append(f"key = {_toml_str(b.get('key', ''))}")
+            if b.get("tap"): lines.append(f"tap = {_toml_str(b['tap'])}")
+            if b.get("hold"): lines.append(f"hold = {_toml_str(b['hold'])}")
+            if b.get("toggle"): lines.append(f"toggle = {_toml_str(b['toggle'])}")
             try:
                 thr = float(b.get("hold_threshold", _HOLD_THRESHOLD_DEFAULT))
                 if thr != _HOLD_THRESHOLD_DEFAULT:
@@ -523,8 +551,26 @@ def _save_config_file(values: dict) -> None:
             except Exception:
                 pass
     lines.append("")
+    text = "\n".join(lines)
+    # Round-trip check BEFORE touching the real file: a bug here must raise,
+    # not leave the user with a config that parses as empty on next start.
+    import tomllib
+    tomllib.loads(text)
     DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    DEFAULT_CONFIG_PATH.write_text("\n".join(lines))
+    if DEFAULT_CONFIG_PATH.is_file():
+        try:
+            with open(DEFAULT_CONFIG_PATH, "rb") as fh:
+                tomllib.load(fh)
+        except tomllib.TOMLDecodeError:
+            # Existing file is already broken (we loaded it as empty):
+            # keep a copy instead of silently destroying the user's settings.
+            bak = DEFAULT_CONFIG_PATH.with_suffix(".toml.bak")
+            bak.write_bytes(DEFAULT_CONFIG_PATH.read_bytes())
+            print(f"shipboard: existing config was invalid; saved a copy to {bak}",
+                  file=sys.stderr)
+    tmp = DEFAULT_CONFIG_PATH.with_suffix(".toml.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, DEFAULT_CONFIG_PATH)
 
 
 def _setup_prefill(values: dict) -> None:

@@ -60,12 +60,15 @@ def _get_config() -> dict:
     """
     global _cfg_cache
     if _cfg_cache is None:
-        try:
-            import tomllib
+        import tomllib
 
+        try:
             with open(_CONFIG_PATH, "rb") as fh:
                 _cfg_cache = tomllib.load(fh)
-        except (OSError, tomllib.TOMLDecodeError):
+        except FileNotFoundError:
+            _cfg_cache = {}
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            print(f"shipboard: cannot read {_CONFIG_PATH}: {exc}", file=sys.stderr)
             _cfg_cache = {}
     return _cfg_cache
 

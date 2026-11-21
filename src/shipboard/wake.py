@@ -58,7 +58,11 @@ def _ensure_sherpa_model() -> bool:
         tmp = _WAKE_MODELS_DIR / "sherpa-kws.tar.bz2.tmp"
         urllib_request.urlretrieve(_SHERPA_URL, tmp)
         with tarfile.open(tmp, "r:bz2") as tf:
-            tf.extractall(_WAKE_MODELS_DIR, filter="data")
+            if hasattr(tarfile, "data_filter"):  # 3.11.4+ / 3.12+
+                tf.extractall(_WAKE_MODELS_DIR, filter="data")
+            else:
+                raise RuntimeError("tarfile safe-extract filter unavailable; "
+                                   "upgrade Python to >=3.11.4")
         tmp.unlink(missing_ok=True)
         return all((_SHERPA_MODEL_DIR / f).is_file() for f in needed)
     except Exception as exc:
@@ -265,6 +269,8 @@ def _wake_listen(self, stop_event: threading.Event) -> None:
                 _notify("shipboard", f"Wake word detected: {phrase}")
                 self.wake_rec = True
                 self._start_record()
+                if not self.recording:
+                    self.wake_rec = False  # start failed/lock busy: nothing to control
                 # autosend is set AFTER _start_record: the latter resets
                 # autosend=False at the start of every recording, so setting
                 # it before was silently wiped (wake record_send never sent).

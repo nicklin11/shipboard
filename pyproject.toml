@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "Voice dictation daemon for Pause/Scroll Lock with a local whisper.cpp backend"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "evdev; platform_system == 'Linux'",
 ]
