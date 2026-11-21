@@ -375,6 +375,49 @@ check("no hardcoded timeout is left in the forwarding call",
       "timeout=300" not in (assets / "scripts" / "whisper_wake_proxy.py").read_text()
       and "timeout=REQUEST_TIMEOUT" in (assets / "scripts" / "whisper_wake_proxy.py").read_text())
 
+# --- 8. proxy rejects bad requests with valid JSON (issue #26) ---------------
+import http.client as _hc
+import json as _json
+import threading as _th
+
+_px = _load_proxy(None)
+_px.MAX_BODY_BYTES = 16
+_srv = _px.ProxyServer(("127.0.0.1", 0), _px.ProxyHandler)
+_th.Thread(target=_srv.serve_forever, daemon=True).start()
+
+
+def _post(headers, body=b""):
+    c = _hc.HTTPConnection("127.0.0.1", _srv.server_address[1], timeout=5)
+    try:
+        c.putrequest("POST", "/inference")
+        for k, v in headers.items():
+            c.putheader(k, v)
+        c.endheaders(body)
+        r = c.getresponse()
+        return r.status, r.read()
+    finally:
+        c.close()
+
+
+_st, _bd = _post({"Content-Length": "999"})
+check("oversize body -> 413", _st == 413, str(_st))
+check("413 body is valid JSON", "error" in _json.loads(_bd))
+_st, _bd = _post({"Transfer-Encoding": "chunked"}, b"0\r\n\r\n")
+check("chunked body -> 411 with JSON error", _st == 411 and "error" in _json.loads(_bd), str(_st))
+_st, _bd = _post({"Content-Length": "abc"})
+check("bad Content-Length -> 400 with JSON error", _st == 400 and "error" in _json.loads(_bd), str(_st))
+# Quotes in the message used to produce a Python repr, which is not JSON.
+_h = _px.ProxyHandler.__new__(_px.ProxyHandler)
+_sent = []
+_h.send_response = lambda *a: None
+_h.send_header = lambda *a: None
+_h.end_headers = lambda: None
+_h.wfile = type("W", (), {"write": lambda self, b: _sent.append(b)})()
+_h._send_error(503, 'could not start "x" it\'s')
+check("_send_error emits valid JSON for quotes",
+      _json.loads(_sent[0])["error"] == 'could not start "x" it\'s')
+_srv.shutdown()
+
 os.environ.clear()
 os.environ.update(saved_env)
 
