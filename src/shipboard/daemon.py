@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .actions import _notify, send_keys
 from .audio import start_recording, stop_recording
+from .locks import open_lock
 from .config import (BOTH_SEND_ENTER, CHANNELS, KEEP_AUDIO_DIR,
                      KEY_BINDINGS, LOCK_PATH, MAX_HOLD, MIN_RECORDING,
                      RATE, RECORD_TARGET, SEND_ENTER, TAP_START_GRACE,
@@ -222,7 +223,7 @@ class _Daemon:
         lock_fh = None
         tmp_dir: Path | None = None
         try:
-            lock_fh = open(LOCK_PATH, "w")
+            lock_fh = open_lock(LOCK_PATH)
             try:
                 fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:

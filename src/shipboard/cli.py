@@ -16,6 +16,7 @@ from .actions import _notify, copy_to_clipboard, normalize_text, send_keys
 from .backend import backend_main
 from .config import DAEMON_LOCK_PATH, LOCK_PATH, SCROLL_SEND_ENTER
 from .daemon import _Daemon, run_record_cycle
+from .locks import open_lock
 from .logstate import _status_main
 from .setup_tui import _config_main, _setup_main, _tui_main
 from .stt import (segments_to_timestamped_text, transcribe, transcribe_segments)
@@ -71,7 +72,7 @@ def _restart_daemon() -> str:
 
 
 def _daemon_main() -> int:
-    lock_fh = open(DAEMON_LOCK_PATH, "w")
+    lock_fh = open_lock(DAEMON_LOCK_PATH)
     try:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -94,10 +95,6 @@ def _daemon_main() -> int:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         daemon.shutdown()
         lock_fh.close()
-        try:
-            Path(DAEMON_LOCK_PATH).unlink(missing_ok=True)
-        except OSError:
-            pass
     return 0
 
 
@@ -140,7 +137,7 @@ def _send_main() -> int:
     """One-shot paste + Enter (manual/backup trigger, e.g. a WM bind)."""
     # Refuse while a recording is in flight so stale content never pastes.
     try:
-        lock_fh = open(LOCK_PATH, "w")
+        lock_fh = open_lock(LOCK_PATH)
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         lock_fh.close()
     except OSError:
@@ -186,7 +183,7 @@ def _process_main(argv: list[str]) -> int:
 
     # Same lock as the record path: never transcribe while a recording is in
     # flight, or the two would race for the clipboard.
-    lock_fh = open(LOCK_PATH, "w")
+    lock_fh = open_lock(LOCK_PATH)
     try:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -232,10 +229,6 @@ def _process_main(argv: list[str]) -> int:
         return 0
     finally:
         lock_fh.close()
-        try:
-            Path(LOCK_PATH).unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def main() -> int:
@@ -306,7 +299,7 @@ def main() -> int:
 
     if args.file is not None or args.seconds > 0 or args.no_copy:
         # Legacy one-shot record flow (no daemon).
-        lock_fh = open(LOCK_PATH, "w")
+        lock_fh = open_lock(LOCK_PATH)
         try:
             fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -344,10 +337,6 @@ def main() -> int:
             return run_record_cycle(autosend=False, seconds=args.seconds)
         finally:
             lock_fh.close()
-            try:
-                Path(LOCK_PATH).unlink(missing_ok=True)
-            except OSError:
-                pass
 
     return _daemon_main()
 

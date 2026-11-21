@@ -100,7 +100,14 @@ check("exit 0 on success", rc == 0, f"rc={rc}")
 check("stdout carries the normalized transcript", out.getvalue().strip() == "привет мир",
       repr(out.getvalue()))
 check("nothing copied without --copy", copied == [])
-check("lock released", not lock.exists())
+import fcntl as _fcntl
+with open(lock, "a+") as _probe:
+    try:
+        _fcntl.flock(_probe, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        _released = True
+    except OSError:
+        _released = False
+check("lock released (flock free; file is never unlinked)", _released)
 
 sbc.transcribe = lambda wav: "скопируй меня"
 out = io.StringIO()
