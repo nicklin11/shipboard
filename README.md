@@ -120,6 +120,12 @@ Troubleshooting). Keys are configured as `[[key_bind]]` tables in
 `~/.config/shipboard/shipboard.toml`, or interactively in `shipboard setup`
 (Keys screen — press the key you want to bind and it gets captured).
 
+**Permissions.** Reading `/dev/input` needs more than a normal user has. Prefer
+the [key relay](contrib/key-relay/README.md) (`sudo contrib/key-relay/install.sh
+--keys rightalt`): a sandboxed system service that passes on only your trigger
+keys. Joining the `input` group works too, but it lets every program you run
+read everything you type.
+
 ```toml
 [[key_bind]]
 key = "pause"            # evdev name, with or without the KEY_ prefix
@@ -260,6 +266,12 @@ Scroll_Lock repeat=false { spawn "true"; }
 bind = , Pause, exec, true
 bind = , Scroll_Lock, exec, true
 ```
+
+**"trigger keys not found on evdev" / "keys off".** The daemon can't read any
+keyboard that has a bound key. Install the [key relay](contrib/key-relay/README.md)
+with the keys from your `[[key_bind]]` tables, then check
+`journalctl -u shipboard-key-relay` lists your keyboards. After changing keys in
+`shipboard.toml`, run `install.sh --keys ...` again with the new list.
 
 **The container doesn't wake.** `shipboard backend status` says which link is
 broken (container down / model absent / proxy unit inactive / URL

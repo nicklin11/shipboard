@@ -1,0 +1,5 @@
+# The virtual keyboard made by shipboard-key-relay.service. It carries only the
+# configured trigger keys. Whoever is logged in at the seat may read it (standard
+# uaccess ACL, applied by 73-seat-late.rules, so this file must sort before 73);
+# libinput ignores it, so the compositor doesn't see the keys twice.
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="shipboard-keys", GROUP="root", MODE="0600", TAG+="uaccess", ENV{LIBINPUT_IGNORE_DEVICE}="1"
