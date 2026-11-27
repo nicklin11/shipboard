@@ -109,8 +109,10 @@ def _input_access_issue() -> str:
     if gname in mine:
         return (f"keys off: /dev/input unreadable despite being in group "
                 f"'{gname}' (session needs log out/in or a udev rule)")
-    return (f"keys off: not in group '{gname}' — run "
-            f"'sudo usermod -aG {gname} $USER' then log out/in")
+    # Don't steer people into `input`: it hands every program a keylogger.
+    return ("keys off: /dev/input not readable — install the key relay: "
+            "sudo contrib/key-relay/install.sh --keys <your keys> "
+            f"(joining '{gname}' also works but lets any program read all typing)")
 
 
 def run_record_cycle(autosend: bool, seconds: float = 0.0) -> int:

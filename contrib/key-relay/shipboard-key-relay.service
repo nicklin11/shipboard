@@ -1,0 +1,43 @@
+[Unit]
+Description=shipboard key relay (the user sees only the trigger keys)
+After=systemd-udevd.service
+
+[Service]
+# Trigger keys: change with `install.sh --keys ...` (writes keys.conf next to this unit).
+Environment=KEYS=rightalt
+ExecStart=/usr/bin/python3 -I /usr/local/lib/shipboard-key-relay/shipboard-key-relay.py --keys ${KEYS}
+Restart=always
+RestartSec=2
+DynamicUser=yes
+SupplementaryGroups=input
+DevicePolicy=closed
+DeviceAllow=char-input r
+DeviceAllow=/dev/uinput rw
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
